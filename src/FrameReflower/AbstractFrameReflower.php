@@ -328,7 +328,8 @@ abstract class AbstractFrameReflower
         }
         $layout = $parent->get_flex_layout();
         if ($layout) {
-            return $layout["definite_height"] ? $layout["height"] : null;
+            return $layout["definite_height"]
+                ? (array_key_exists("reference_height", $layout) ? $layout["reference_height"] : $layout["height"]) : null;
         }
         $style = $parent->get_style();
         $height = $style->get_computed("height");
@@ -611,14 +612,31 @@ abstract class AbstractFrameReflower
     }
 
     /**
-     * Handle counters and set generated content if the frame is a
-     * generated-content frame.
+     * Commit logical content in source order before flex probes or visual reflow.
      */
+    protected function prepare_content(): void
+    {
+        $frame = $this->_frame;
+        if ($frame->content_prepared || $frame->get_style()->display === "none") {
+            return;
+        }
+        $this->_set_content();
+        $frame->content_prepared = true;
+        foreach ($frame->get_children() as $child) {
+            $child->get_reflower()->prepare_content();
+        }
+    }
+
+    /** Handle counters and generated content for the current reflow. */
     protected function _set_content(): void
     {
         $frame = $this->_frame;
 
         if ($frame->content_set) {
+            return;
+        }
+        if ($frame->content_prepared) {
+            $frame->content_set = true;
             return;
         }
 

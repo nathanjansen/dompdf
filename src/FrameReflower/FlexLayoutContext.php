@@ -159,6 +159,7 @@ class FlexLayoutContext
         $copy->set_root($root ?: $copy);
         $copy->_counters = $source->_counters;
         $copy->content_set = $source->content_set;
+        $copy->content_prepared = $source->content_prepared;
         $copy->is_split = $source->is_split;
         $copy->is_split_off = $source->is_split_off;
         $cb = $source->get_containing_block();

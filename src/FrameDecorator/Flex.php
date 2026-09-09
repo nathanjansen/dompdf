@@ -13,8 +13,21 @@ class Flex extends Block
 {
     private $item_layouts = [];
 
-    /** Original fixed row slots, retained through ancestor continuation reset. */
+    /** Resolved physical slots, retained through ancestor continuation reset. */
     private $continuation_slots = [];
+
+    /** Remaining physical column extent, not its CSS percentage reference. */
+    private $continuation_extent;
+
+    public function get_continuation_extent(): ?float
+    {
+        return $this->continuation_extent;
+    }
+
+    public function set_continuation_extent(float $extent): void
+    {
+        $this->continuation_extent = $extent;
+    }
 
     public function get_flex_items(): array
     {

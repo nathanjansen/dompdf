@@ -60,6 +60,327 @@ class FlexTest extends TestCase
         }
     }
 
+    public function testPreparedCountersSurviveWholeItemDeferralWithoutReplay(): void
+    {
+        $result = $this->layout('<div style="height:60pt">LEAD</div><div style="display:flex;width:200pt">'
+            . '<div data-test="A" class="counter" style="flex:none;width:100pt;height:60pt">A</div>'
+            . '<div data-test="B" class="counter" style="flex:none;width:100pt;height:20pt">B</div></div><div class="after">AFTER</div>',
+            '@page {size:200pt 100pt}body {counter-reset:n}.counter {counter-increment:n}.counter:before,.after:before {content:counter(n)}', 2);
+        $this->assertSame(2, $result["pages"]);
+        $this->assertSame("LEAD2B", implode("", array_column($result["text"][1], 0)));
+        $this->assertSame("1A2AFTER", implode("", array_column($result["text"][2], 0)));
+        $this->assertSame(2, $result["boxes"]["A"][0]["page"]);
+        $this->assertSame(1, $result["boxes"]["B"][0]["page"]);
+    }
+
+    public static function directionGeometryProvider(): array
+    {
+        return [
+            "row reverse LTR" => ["row-reverse", "ltr", "flex:none;width:100pt;height:20pt", [200, 0, 100, 20], [100, 0, 100, 20]],
+            "row RTL" => ["row", "rtl", "flex:none;width:100pt;height:20pt", [200, 0, 100, 20], [100, 0, 100, 20]],
+            "row reverse RTL" => ["row-reverse", "rtl", "flex:none;width:100pt;height:20pt", [0, 0, 100, 20], [100, 0, 100, 20]],
+            "column grows" => ["column", "ltr", "flex:1 1 100pt;min-height:0;width:100pt", [0, 0, 100, 150], [0, 150, 100, 150]],
+            "column reverse" => ["column-reverse", "ltr", "flex:none;width:100pt;height:100pt", [0, 200, 100, 100], [0, 100, 100, 100]],
+            "column RTL cross start" => ["column", "rtl", "flex:1 1 100pt;min-height:0;width:100pt", [200, 0, 100, 150], [200, 150, 100, 150]]
+        ];
+    }
+
+    public function testAutoColumnPreservesEveryItemAcrossPhysicalPagesInEitherDirection(): void
+    {
+        foreach (["column" => ["ABCDE", "FAFTER"], "column-reverse" => ["FEDCB", "AAFTER"]] as $direction => $expected) {
+            $html = '<article><div style="display:flex;flex-direction:' . $direction . ';width:200pt">';
+            foreach (str_split("ABCDEF") as $letter) {
+                $html .= '<div data-test="' . $letter . '" style="flex:none;width:100pt;height:20pt">' . $letter . '</div>';
+            }
+            $result = $this->layout($html . '</div></article><div data-test="after">AFTER</div>', '@page {size:200pt 100pt}', 2);
+            $this->assertSame(2, $result["pages"]);
+            foreach ([1, 2] as $page) {
+                $tokens = $result["text"][$page];
+                usort($tokens, function ($a, $b) {
+                    return $a[2] <=> $b[2];
+                });
+                $this->assertSame($expected[$page - 1], implode("", array_column($tokens, 0)));
+            }
+            foreach (str_split($expected[0]) as $index => $letter) {
+                $this->assertBox($result, $letter, [0, $index * 20, 100, 20]);
+            }
+            $this->assertBox($result, $expected[1][0], [0, 0, 100, 20]);
+            $this->assertBox($result, "after", [0, 20]);
+        }
+    }
+
+    public function testColumnReplacedMinimumUsesSmallerNaturalAndTransferredSuggestion(): void
+    {
+        $result = $this->layout('<div style="display:flex;flex-direction:column;width:200pt;height:80pt">'
+            . '<img data-test="image" src="' . $this->image() . '" style="width:200pt;flex:0 1 auto;align-self:flex-start"></div>');
+        $this->assertBox($result, "image", [0, 0, 200, 80]);
+    }
+
+    public function testAutoColumnOuterMinMaxConstrainExtentWithoutCreatingDefiniteness(): void
+    {
+        $minimum = $this->layout('<div data-test="row" style="display:flex;flex-direction:column;width:100pt;min-height:100pt">'
+            . '<div data-test="item" style="flex:none;height:50%"><div style="height:20pt"></div><div data-test="percent" style="height:50%"></div></div>'
+            . '</div><div data-test="after">AFTER</div>');
+        $this->assertBox($minimum, "row", [0, 0, 100, 100]);
+        $this->assertBox($minimum, "item", [0, 0, 100, 20]);
+        $this->assertEqualsWithDelta(0, $minimum["boxes"]["percent"][0]["content"][3], 0.01);
+        $this->assertBox($minimum, "after", [0, 100]);
+        $maximum = $this->layout('<div data-test="row" style="display:flex;flex-direction:column;width:100pt;max-height:100pt">'
+            . '<div data-test="A" style="flex:0 1 auto;min-height:0;height:80pt">A</div>'
+            . '<div data-test="B" style="flex:0 1 auto;min-height:0;height:80pt">B</div></div>');
+        $this->assertBox($maximum, "row", [0, 0, 100, 100]);
+        $this->assertBox($maximum, "A", [0, 0, 100, 50]);
+        $this->assertBox($maximum, "B", [0, 50, 100, 50]);
+    }
+
+    public static function emptyColumnExtentProvider(): array
+    {
+        return [
+            "column minimum" => ["column", "min-height:100pt", 100],
+            "reverse minimum" => ["column-reverse", "min-height:100pt", 100],
+            "column auto control" => ["column", "", 0],
+            "reverse auto control" => ["column-reverse", "", 0]
+        ];
+    }
+
+    /** @dataProvider emptyColumnExtentProvider */
+    #[\PHPUnit\Framework\Attributes\DataProvider('emptyColumnExtentProvider')]
+    public function testEmptyAutoColumnsHonorOuterMinimumAndFollowingFlow(string $direction, string $constraint, float $height): void
+    {
+        $result = $this->layout('<div data-test="column" style="display:flex;flex-direction:' . $direction . ';width:100pt;' . $constraint . '"></div>'
+            . '<div data-test="after">AFTER</div>');
+        $this->assertBox($result, "column", [0, 0, 100, $height]);
+        $this->assertBox($result, "after", [0, $height]);
+        $this->assertSame("AFTER", implode("", array_column($result["text"][1], 0)));
+        $this->assertSame(1, $result["pages"]);
+    }
+
+    public function testReverseColumnContinuationKeepsSourceChildrenAndCounters(): void
+    {
+        $html = '<div data-test="row" style="display:flex;flex-direction:column-reverse;width:200pt">';
+        foreach (str_split("ABCDEFGH") as $letter) {
+            $html .= '<div data-test="' . $letter . '" class="item" style="flex:none;width:100pt;height:20pt">' . $letter . '</div>';
+        }
+        $result = $this->layout($html . '</div><div class="after">AFTER</div>', '@page {size:200pt 100pt}body {counter-reset:n}'
+            . '.item {counter-increment:n}.item:before,.after:before {content:"N" counter(n)}', 2);
+        $this->assertSame(["A", "B", "C"], $result["boxes"]["row"][1]["source"]);
+        $this->assertSame("N1AN2BN3CN8AFTER", implode("", array_column($result["text"][2], 0)));
+        $this->assertSame("N4DN5EN6FN7GN8H", implode("", array_column($result["text"][1], 0)));
+        $this->assertBox($result, "C", [0, 0, 100, 20]);
+        $this->assertBox($result, "B", [0, 20, 100, 20]);
+        $this->assertBox($result, "A", [0, 40, 100, 20]);
+    }
+
+    public function testAutoColumnDistinguishesZeroLengthAndUnresolvedPercentageBasis(): void
+    {
+        foreach (["0 0 0pt" => 0, "0 0 0%" => 100, "0 0" => 0] as $flex => $height) {
+            $result = $this->layout('<div data-test="row" style="display:flex;flex-direction:column;width:100pt;min-height:0">'
+                . '<div data-test="item" style="flex:' . $flex . ';min-height:0"><div data-test="green" style="height:100pt"></div>'
+                . '<div data-test="red" style="height:100%"></div></div></div>');
+            $this->assertEqualsWithDelta($height, $result["boxes"]["row"][0]["content"][3], 0.01);
+            $this->assertEqualsWithDelta($height, $result["boxes"]["item"][0]["content"][3], 0.01);
+            $this->assertEqualsWithDelta(100, $result["boxes"]["green"][0]["content"][3], 0.01);
+            $this->assertEqualsWithDelta(0, $result["boxes"]["red"][0]["content"][3], 0.01);
+        }
+    }
+
+    public function testColumnPartialItemRetainsLaterSiblingAndLogicalPercentageReference(): void
+    {
+        foreach (["40pt", "25%"] as $tailHeight) {
+            $html = '<article><div style="display:flex;flex-direction:column;width:200pt"><div data-test="A" style="flex:none;width:100pt;height:160pt">';
+            for ($i = 1; $i <= 6; $i++) {
+                $html .= '<div style="height:20pt;page-break-inside:avoid">A' . $i . '</div>';
+            }
+            $result = $this->layout($html . '<div data-test="tail" style="height:' . $tailHeight . ';page-break-inside:avoid">TAIL</div></div>'
+                . '<div data-test="B" style="flex:none;width:100pt;height:20pt">B</div></div></article><div data-test="after">AFTER</div>', '@page {size:200pt 100pt}', 2);
+            $this->assertSame(2, $result["pages"]);
+            $this->assertSame("A1A2A3A4A5", implode("", array_column($result["text"][1], 0)));
+            $this->assertSame("A6TAILBAFTER", implode("", array_column($result["text"][2], 0)));
+            $this->assertBox($result, "tail", [0, 20, 100, 40]);
+            $this->assertBox($result, "B", [0, 60, 100, 20]);
+            $this->assertBox($result, "after", [0, 80]);
+        }
+    }
+
+    public function testColumnWholeDeferralKeepsEmptyBlockOrImageAndUntouchedSibling(): void
+    {
+        foreach ([false, true] as $image) {
+            $item = $image ? '<img data-test="A" src="' . $this->image() . '" style="flex:none;width:60pt;height:30pt">'
+                : '<div data-test="A" style="flex:none;width:60pt;height:30pt"></div>';
+            $result = $this->layout('<div style="height:80pt">LEAD</div><article><div style="display:flex;flex-direction:column;width:200pt">'
+                . $item . '<div data-test="B" style="flex:none;width:100pt;height:20pt">B</div></div></article><div data-test="after">AFTER</div>',
+                '@page {size:200pt 100pt}', 2);
+            $this->assertSame(2, $result["pages"]);
+            $this->assertSame("LEAD", implode("", array_column($result["text"][1], 0)));
+            $this->assertSame("BAFTER", implode("", array_column($result["text"][2], 0)));
+            $this->assertCount(1, $result["boxes"]["A"]);
+            $this->assertSame(2, $result["boxes"]["A"][0]["page"]);
+            $this->assertBox($result, "A", [0, 0, 60, 30]);
+            $this->assertBox($result, "B", [0, 30, 100, 20]);
+            $this->assertBox($result, "after", [0, 50]);
+        }
+    }
+
+    public function testColumnOversizedAndZeroHeightItemsMakeProgress(): void
+    {
+        foreach ([150, 0] as $height) {
+            $result = $this->layout('<div style="display:flex;flex-direction:column;width:200pt"><div data-test="A" style="flex:none;width:100pt;height:' . $height . 'pt"></div>'
+                . '<div data-test="B" style="flex:none;width:100pt;height:20pt">B</div></div><div data-test="after">AFTER</div>', '@page {size:200pt 100pt}', 2);
+            $this->assertSame($height ? 2 : 1, $result["pages"]);
+            $this->assertCount(1, $result["boxes"]["A"]);
+            $this->assertBox($result, "A", [0, 0, 100, $height]);
+            $this->assertBox($result, "B", [0, 0, 100, 20]);
+            $this->assertBox($result, "after", [0, 20]);
+        }
+    }
+
+    public function testColumnBoundaryForcedBreakKeepsUntouchedItems(): void
+    {
+        $html = '<div style="display:flex;flex-direction:column;width:200pt">';
+        foreach (["A", "B", "C"] as $letter) {
+            $html .= '<div data-test="' . $letter . '" style="flex:none;width:100pt;height:20pt;' . ($letter === "B" ? 'page-break-before:always' : '') . '">' . $letter . '</div>';
+        }
+        $result = $this->layout($html . '</div><div data-test="after">AFTER</div>', '@page {size:200pt 100pt}', 2);
+        $this->assertSame("A", implode("", array_column($result["text"][1], 0)));
+        $this->assertSame("BCAFTER", implode("", array_column($result["text"][2], 0)));
+        $this->assertBox($result, "B", [0, 0, 100, 20]);
+        $this->assertBox($result, "C", [0, 20, 100, 20]);
+        $this->assertBox($result, "after", [0, 40]);
+    }
+
+    public function testAutoColumnLongItemKeepsUntouchedSiblingFromFullOrPartialPage(): void
+    {
+        foreach ([0, 20] as $lead) {
+            $html = $lead ? '<div style="height:20pt">LEAD</div>' : '';
+            $html .= '<div style="display:flex;flex-direction:column;width:200pt"><div style="flex:none;width:100pt">';
+            for ($i = 1; $i <= 8; $i++) {
+                $html .= '<div style="height:20pt;page-break-inside:avoid">A' . $i . '</div>';
+            }
+            $result = $this->layout($html . '</div><div data-test="B" style="flex:none;width:100pt;height:20pt">B</div></div>'
+                . '<div data-test="after" style="height:20pt">AFTER</div>', '@page {size:200pt 100pt}', 3);
+            $this->assertSame($lead ? 3 : 2, $result["pages"]);
+            $this->assertSame($lead ? "LEADA1A2A3A4" : "A1A2A3A4A5", implode("", array_column($result["text"][1], 0)));
+            $this->assertSame($lead ? "A5A6A7A8B" : "A6A7A8BAFTER", implode("", array_column($result["text"][2], 0)));
+            if ($lead) {
+                $this->assertSame("AFTER", implode("", array_column($result["text"][3], 0)));
+            }
+            $this->assertBox($result, "B", [0, $lead ? 80 : 60, 100, 20]);
+            $this->assertBox($result, "after", [0, $lead ? 0 : 80]);
+        }
+    }
+
+    public function testNestedColumnContinuationKeepsOuterNeighborAndOriginalReference(): void
+    {
+        $html = '<article><div style="display:flex;width:200pt"><div data-test="column" style="display:flex;flex-direction:column;flex:none;width:100pt;height:180pt">'
+            . '<div style="flex:none;width:100pt;height:calc(100% - 20pt)">';
+        for ($i = 1; $i <= 6; $i++) {
+            $html .= '<div style="height:20pt;page-break-inside:avoid">A' . $i . '</div>';
+        }
+        $result = $this->layout($html . '<div data-test="tail" style="height:25%;page-break-inside:avoid">TAIL</div></div>'
+            . '<div style="flex:none;width:100pt;height:20pt">B</div></div><div data-test="neighbor" style="flex:none;width:100pt;height:20pt">NEIGHBOR</div>'
+            . '</div></article><div data-test="after">AFTER</div>', '@page {size:200pt 100pt}', 2);
+        $this->assertSame(2, $result["pages"]);
+        $this->assertSame("A1A2A3A4A5NEIGHBOR", implode("", array_column($result["text"][1], 0)));
+        $this->assertSame("A6TAILBAFTER", implode("", array_column($result["text"][2], 0)));
+        $this->assertCount(1, $result["boxes"]["neighbor"]);
+        $this->assertBox($result, "neighbor", [100, 0, 100, 20]);
+        $this->assertBox($result, "tail", [0, 20, 100, 40]);
+        $this->assertBox($result, "column", [0, 0, 100, 80], 1);
+        $this->assertBox($result, "after", [0, 80]);
+    }
+
+    public function testAxisPlacementCountsAsymmetricEdgesOnceAndKeepsOrderTies(): void
+    {
+        $row = $this->layout('<div style="display:flex;flex-direction:row-reverse;width:300pt">'
+            . '<div data-test="A" style="flex:none;width:50pt;height:20pt;padding:0 10pt 0 5pt;border-left:1pt solid;border-right:1pt solid;margin:0 3pt 0 7pt">A</div>'
+            . '<div data-test="B" style="flex:none;width:40pt;height:20pt;padding:0 4pt 0 2pt;border-left:3pt solid;border-right:1pt solid;margin:0 9pt 0 5pt">B</div></div>');
+        $this->assertBox($row, "A", [230, 0, 67, 20]);
+        $this->assertBox($row, "B", [164, 0, 50, 20]);
+        $column = $this->layout('<div style="display:flex;flex-direction:column;width:100pt">'
+            . '<div data-test="A" style="flex:none;width:100pt;height:50pt;padding:5pt 0 10pt;border-top:1pt solid;border-bottom:1pt solid;margin:7pt 0 3pt">A</div>'
+            . '<div data-test="B" style="flex:none;width:100pt;height:40pt;padding:2pt 0 4pt;border-top:3pt solid;border-bottom:1pt solid;margin:5pt 0 9pt">B</div></div><div data-test="after">AFTER</div>');
+        $this->assertBox($column, "A", [0, 7, 100, 67]);
+        $this->assertBox($column, "B", [0, 82, 100, 50]);
+        $this->assertBox($column, "after", [0, 141]);
+        $ties = $this->layout('<div data-test="row" style="display:flex;width:200pt"><div data-test="A" style="flex:none;width:50pt">A</div>'
+            . '<div data-test="B" style="flex:none;width:50pt;order:-1">B</div><div data-test="C" style="flex:none;width:50pt">C</div></div>');
+        $this->assertBox($ties, "A", [50, 0, 50]);
+        $this->assertBox($ties, "B", [0, 0, 50]);
+        $this->assertBox($ties, "C", [100, 0, 50]);
+        $this->assertSame(["A", "B", "C"], $ties["boxes"]["row"][0]["source"]);
+    }
+
+    /** @dataProvider directionGeometryProvider */
+    #[\PHPUnit\Framework\Attributes\DataProvider('directionGeometryProvider')]
+    public function testHorizontalWritingModeMapsAxesWithoutChangingSourceOrder(string $direction, string $textDirection, string $item, array $a, array $b): void
+    {
+        $result = $this->layout('<div data-test="row" style="display:flex;width:300pt;height:300pt;flex-direction:' . $direction . ';direction:' . $textDirection . '">'
+            . '<div data-test="A" style="align-self:flex-start;' . $item . '">A</div><div data-test="B" style="align-self:flex-start;' . $item . '">B</div>'
+            . '</div><div data-test="after">AFTER</div>', '@page {size:500pt 1000pt}', 1);
+        $this->assertBox($result, "A", $a);
+        $this->assertBox($result, "B", $b);
+        $this->assertSame(["A", "B"], $result["boxes"]["row"][0]["source"]);
+        $this->assertEqualsWithDelta(300, $result["boxes"]["after"][0]["box"][1], 0.01);
+        $this->assertSame("ABAFTER", implode("", array_column($result["text"][1], 0)));
+    }
+
+    public function testSourceCounterContentIsPreparedBeforeAnySortedIntrinsicProbe(): void
+    {
+        foreach ([[false, "row", 0, 12], [true, "row", 18, 0], [false, "row-reverse", 88, 70], [true, "row-reverse", 70, 82]] as [$ordered, $direction, $ax, $bx]) {
+            $result = $this->layout('<div data-test="row" style="display:flex;width:100pt;flex-direction:' . $direction . '"><div data-test="A" class="counter" style="order:' . ($ordered ? 2 : 0) . '">A</div>'
+                . '<div data-test="B" class="counter" style="order:' . ($ordered ? 1 : 0) . '">B</div></div><div class="after">AFTER</div>',
+                'body {font:10pt/20pt Courier;counter-reset:n 8}.counter {flex:none;counter-increment:n}.counter:before,.after:before {content:counter(n)}');
+            $this->assertBox($result, "A", [$ax, 0, 12]);
+            $this->assertBox($result, "B", [$bx, 0, 18]);
+            $this->assertSame(["A", "B"], $result["boxes"]["row"][0]["source"]);
+            $this->assertSame("9A10B10AFTER", implode("", array_column($result["text"][1], 0)));
+        }
+    }
+
+    public function testPreparedNestedScopesIncludeBeforeAfterAndPositionedSourceChildren(): void
+    {
+        $result = $this->layout('<div data-test="row" style="display:flex;width:200pt">'
+            . '<div class="item a" style="order:2">A<span style="counter-reset:m 4"><i style="counter-increment:m 2">X</i></span></div>'
+            . '<div style="position:absolute;counter-increment:n 3">P</div><div class="item" style="order:1">B</div>'
+            . '<div style="display:none;counter-increment:n 100">HIDDEN</div></div><div class="after">AFTER</div>',
+            'body {counter-reset:n}.item {flex:none;width:80pt;counter-increment:n}.item:before,.a:after,.after:before {content:counter(n)}i:before {content:counter(m)}');
+        $text = implode("", array_column($result["text"][1], 0));
+        $this->assertSame(1, substr_count($text, "P"));
+        $this->assertSame("1A6X15B5AFTER", str_replace("P", "", $text));
+    }
+
+    public function testPreparedGeneratedInlineSuffixSurvivesLineAndPageSplits(): void
+    {
+        $result = $this->layout('<div style="display:flex;width:200pt"><div class="a" style="flex:none;width:80pt;counter-increment:n">'
+            . '<span style="counter-increment:n 3"><i></i><br>END</span></div><div class="b" style="flex:none;width:80pt;counter-increment:n">B</div>'
+            . '</div><div class="after">AFTER</div>', '@page {size:200pt 100pt}body {counter-reset:n}.a:before,.b:before {content:"N" counter(n)}'
+            . '.a:after {content:"E" counter(n)}.after:before {content:"Z" counter(n)}'
+            . 'i:before {content:"T1\A T2\A T3\A T4\A T5\A T6\A T7\A T8";white-space:pre;font:10pt/30pt Times-Roman}', 4);
+        $this->assertGreaterThan(1, $result["pages"]);
+        $text = "";
+        foreach ($result["text"] as $page) {
+            $text .= implode("", array_column($page, 0));
+        }
+        foreach (["N1", "N5", "E4", "Z5", "END", "AFTER", "T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8"] as $token) {
+            $this->assertSame(1, substr_count($text, $token), $token);
+        }
+    }
+
+    public function testPreparedListPageFragmentsDoNotRepeatMarkers(): void
+    {
+        $html = '<div style="display:flex;width:200pt"><section style="flex:none;width:100pt"><ol style="margin:0;padding-left:20pt"><li>';
+        for ($i = 1; $i <= 8; $i++) {
+            $html .= '<div style="height:20pt;page-break-inside:avoid">A' . $i . '</div>';
+        }
+        $result = $this->layout($html . '</li><li>B</li></ol></section></div><div>AFTER</div>', '@page {size:200pt 100pt}', 3);
+        $this->assertSame(["1", "2"], $result["bullets"]);
+        $text = "";
+        foreach ($result["text"] as $page) {
+            $text .= implode("", array_column($page, 0));
+        }
+        $this->assertSame("A1A2A3A4A5A6A7A8BAFTER", $text);
+    }
+
     public function testFixedRow(): void
     {
         $result = $this->layout('<div data-test="row" style="display:flex;width:300pt;align-items:flex-start">'

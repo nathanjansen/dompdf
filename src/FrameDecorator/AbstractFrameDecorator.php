@@ -98,6 +98,9 @@ abstract class AbstractFrameDecorator extends Frame
      */
     public $content_set = false;
 
+    /** Logical content/effects committed in source order, independent of reflow. */
+    public $content_prepared = false;
+
     /**
      * Whether the frame has been split
      *
@@ -175,6 +178,16 @@ abstract class AbstractFrameDecorator extends Frame
 
         $deco = Factory::decorate_frame($frame, $this->_dompdf, $this->_root);
 
+        if ($this->content_prepared) {
+            $deco->content_prepared = true;
+            $deco->_counters = $this->_counters;
+            // Factory inserts a new list marker; physical copies keep only
+            // the actual marker/suffix moved or copied from the source.
+            if (($marker = $deco->get_first_child()) && $marker->get_node()->nodeName === "bullet") {
+                $deco->remove_child($marker);
+            }
+        }
+
         if ($this instanceof Text) {
             $deco->trailingWs = $this->trailingWs;
         }
@@ -189,6 +202,13 @@ abstract class AbstractFrameDecorator extends Frame
      */
     function deep_copy()
     {
+        if ($this->content_prepared) {
+            $copy = $this->copy($this->_frame->get_node()->cloneNode());
+            foreach ($this->get_children() as $child) {
+                $copy->append_child($child->deep_copy());
+            }
+            return $copy;
+        }
         $node = $this->_frame->get_node()->cloneNode();
         $frame = new Frame($node);
         $style = clone $this->_frame->get_style();
@@ -240,11 +260,13 @@ abstract class AbstractFrameDecorator extends Frame
     {
         $this->_frame->reset();
         $this->_reflower->reset();
-        $this->reset_generated_content();
-        $this->revert_counter_increment();
+        if (!$this->content_prepared) {
+            $this->reset_generated_content();
+            $this->revert_counter_increment();
+            $this->_counters = [];
+        }
 
         $this->content_set = false;
-        $this->_counters = [];
 
         // clear parent lookup caches
         $this->_cached_parent = null;
@@ -283,7 +305,7 @@ abstract class AbstractFrameDecorator extends Frame
      */
     protected function revert_counter_increment(): void
     {
-        if ($this->content_set
+        if (!$this->content_prepared && $this->content_set
             && $this->get_node()->nodeName !== "body"
             && ($decrement = $this->get_style()->counter_increment) !== "none"
         ) {

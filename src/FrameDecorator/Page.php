@@ -780,7 +780,9 @@ class Page extends AbstractFrameDecorator
             $item = $context->get_item();
             $pageTop = $this->get_containing_block("y")
                 + (float) $this->get_style()->length_in_pt($this->get_style()->margin_top, $this->get_containing_block("w"));
-            if (!$item->_already_pushed && Helpers::lengthGreater($item->get_containing_block("y"), $pageTop)) {
+            $layout = $context->get_item_layout();
+            $itemTop = $layout !== null ? $layout["y"] : $item->get_containing_block("y");
+            if (!$item->_already_pushed && Helpers::lengthGreater($itemTop, $pageTop)) {
                 $context->defer();
                 $this->_page_full = true;
                 return true;

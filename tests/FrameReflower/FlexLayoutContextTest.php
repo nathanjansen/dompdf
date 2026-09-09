@@ -43,6 +43,29 @@ class FlexLayoutContextTest extends TestCase
         });
     }
 
+    public function testPreparedListCopiesKeepOnlyActualMarkerAndContent(): void
+    {
+        $dompdf = $this->document('<div style="display:flex;width:200pt"><section id="item" style="width:100pt;flex:none"><ol><li>ONE</li></ol></section></div>');
+        $this->inspectEntry($dompdf, function ($item) {
+            $before = $this->snapshot($item->get_root());
+            $li = $item->get_first_child()->get_first_child();
+            $this->assertTrue($li->content_prepared);
+            $deep = $li->deep_copy();
+            $this->assertSame([["ONE"], ["1"]], $this->content($deep));
+            $deep->reset();
+            $this->assertFalse($deep->content_set);
+            $this->assertTrue($deep->content_prepared);
+            $this->assertSame([["ONE"], ["1"]], $this->content($deep));
+            $shell = $li->copy($li->get_node()->cloneNode());
+            $this->assertSame([[], []], $this->content($shell));
+            $context = new FlexLayoutContext($item, true, null);
+            foreach ([1, 2] as $repeat) {
+                $this->assertSame([["ONE"], ["1"]], $this->content($context->layout()["fragment"]));
+            }
+            $this->assertSame($before, $this->snapshot($item->get_root()));
+        });
+    }
+
     public function testRepeatedFlexedMeasurementPreservesLiveStateAndCallbacks(): void
     {
         $dompdf = $this->document('<div style="display:flex;width:150pt"><section id="item" style="width:200pt;flex:1 1 100pt;min-width:0">'
@@ -96,7 +119,7 @@ class FlexLayoutContextTest extends TestCase
             $result[] = [
                 $child, $child->get_node(), $child->get_node()->nodeValue,
                 $child->get_parent(), $child->get_prev_sibling(), $child->get_next_sibling(),
-                $child->get_root(), $style, $child->_counters, $child->content_set,
+                $child->get_root(), $style, $child->_counters, $child->content_set, $child->content_prepared,
                 [$child->get_containing_block("x"), $child->get_containing_block("y"), $child->get_containing_block("w"), $child->get_containing_block("h")],
                 [$child->get_position("x"), $child->get_position("y")]
             ];
