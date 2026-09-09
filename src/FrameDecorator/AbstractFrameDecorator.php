@@ -693,7 +693,14 @@ abstract class AbstractFrameDecorator extends Frame
      */
     public function split(?Frame $child = null, bool $page_break = false, bool $forced = false): void
     {
+        $context = $page_break ? $this->_root->get_flex_context() : null;
+        $boundary = $context && $context->get_item() === $this;
+        $local = $context && $context->contains($this);
         if (is_null($child)) {
+            if ($boundary) {
+                $context->defer();
+                return;
+            }
             $this->get_parent()->split($this, $page_break, $forced);
             return;
         }
@@ -702,7 +709,9 @@ abstract class AbstractFrameDecorator extends Frame
             throw new Exception("Unable to split: frame is not a child of this one.");
         }
 
-        $this->revert_counter_increment();
+        if (!$local) {
+            $this->revert_counter_increment();
+        }
 
         $node = $this->_frame->get_node();
         $split = $this->copy($node->cloneNode());
@@ -730,6 +739,11 @@ abstract class AbstractFrameDecorator extends Frame
 
         $split_style->text_indent = 0.0;
         $split_style->counter_reset = "none";
+        if ($local) {
+            // This wrapper remains on the current page; its continuation is
+            // the same logical element and must not increment counters again.
+            $split_style->counter_increment = "none";
+        }
 
         $this->is_split = true;
         $split->is_split_off = true;
@@ -763,7 +777,11 @@ abstract class AbstractFrameDecorator extends Frame
             $split->append_child($frame);
         }
 
-        $this->get_parent()->split($split, $page_break, $forced);
+        if ($boundary) {
+            $context->capture_continuation($split, $forced);
+        } else {
+            $this->get_parent()->split($split, $page_break, $forced);
+        }
 
         // Preserve the current counter values. This must be done after the
         // parent split, as counters get reset on frame reset

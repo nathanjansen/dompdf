@@ -62,12 +62,22 @@ class Inline extends AbstractFrameDecorator
             throw new Exception("Unable to split: frame is not a child of this one.");
         }
 
-        $this->revert_counter_increment();
+        // Both line and page fragments remain the same logical inline element.
+        // Only counter bookkeeping changes here; line split routing is unchanged.
+        $context = $this->_root ? $this->_root->get_flex_context() : null;
+        $local = $context && $context->contains($this);
+        if (!$local) {
+            $this->revert_counter_increment();
+        }
         $node = $this->_frame->get_node();
         $split = $this->copy($node->cloneNode());
 
         $style = $this->_frame->get_style();
         $split_style = $split->get_style();
+        if ($local) {
+            $split_style->counter_reset = "none";
+            $split_style->counter_increment = "none";
+        }
 
         // Unset the current node's right style properties
         $style->margin_right = 0.0;

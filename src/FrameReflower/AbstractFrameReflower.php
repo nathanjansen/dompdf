@@ -138,6 +138,10 @@ abstract class AbstractFrameReflower
     protected function _collapse_margins(): void
     {
         $frame = $this->_frame;
+        $context = $frame->get_root()->get_flex_context();
+        if ($context && $context->get_item() === $frame) {
+            return;
+        }
 
         // Margins of float/absolutely positioned/inline-level elements do not collapse
         if (!$frame->is_in_flow() || $frame->is_inline_level()

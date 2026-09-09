@@ -22,7 +22,8 @@ class Block extends AbstractPositioner
         $cb = $frame->get_containing_block();
         $p = $frame->find_block_parent();
 
-        if ($p) {
+        $context = $frame->get_root()->get_flex_context();
+        if ($p && (!$context || $context->get_item() !== $frame)) {
             $float = $style->float;
 
             if (!$float || $float === "none") {
