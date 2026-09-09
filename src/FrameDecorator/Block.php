@@ -54,6 +54,42 @@ class Block extends AbstractFrameDecorator
         $this->dangling_markers = [];
     }
 
+    public function get_baseline(bool $last = false): ?float
+    {
+        $lines = $last ? array_reverse($this->_line_boxes) : $this->_line_boxes;
+        foreach ($lines as $line) {
+            $frames = $line->get_frames();
+            if ($last) {
+                $frames = array_reverse($frames);
+            }
+            foreach ($frames as $frame) {
+                if (!$frame->is_in_flow()) {
+                    continue;
+                }
+                $inline = $frame->get_positioner() instanceof \Dompdf\Positioner\Inline;
+                $inlineBlock = $inline && $frame->get_style()->display === "inline-block";
+                $baseline = $inlineBlock && $frame->get_style()->get_computed("overflow") !== "visible"
+                    ? $frame->get_margin_height() : $frame->get_baseline($inline ? $inlineBlock : $last);
+                if ($baseline === null && $inline && !$frame->is_text_node()) {
+                    // Atomic participants synthesize a baseline at their margin edge.
+                    $baseline = $frame->get_margin_height();
+                }
+                if ($baseline !== null && $inline) {
+                    $target = $line->get_vertical_offset($frame);
+                    if ($target !== null) {
+                        $baseline = $line->baseline - $target;
+                    } elseif (!$line->is_legacy_alignment_skipped($frame)) {
+                        $baseline = $line->h * 0.8 - $line->get_legacy_vertical_offset($frame);
+                    }
+                }
+                if ($baseline !== null) {
+                    return $frame->get_position("y") - $this->get_position("y") + $baseline;
+                }
+            }
+        }
+        return null;
+    }
+
     function reset()
     {
         parent::reset();
@@ -215,6 +251,10 @@ class Block extends AbstractFrameDecorator
         if ($val > $this->_line_boxes[$this->_cl]->h) {
             $this->_line_boxes[$this->_cl]->tallest_frame = $frame;
             $this->_line_boxes[$this->_cl]->h = $val;
+        }
+        $line = $this->_line_boxes[$this->_cl];
+        if ($line->baseline !== null || ($frame instanceof Flex && $frame->get_positioner() instanceof \Dompdf\Positioner\Inline)) {
+            $line->recalculate_flex_metrics();
         }
     }
 

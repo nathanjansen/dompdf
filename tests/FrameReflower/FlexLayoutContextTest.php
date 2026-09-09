@@ -70,6 +70,74 @@ class FlexLayoutContextTest extends TestCase
         $this->assertGreaterThan(0, $callbacks);
     }
 
+    public function testRepeatedAlignedStretchMeasurementPreservesCountersMarkersAndNativeState(): void
+    {
+        $dompdf = $this->document('<section id="item"><div style="display:flex;width:200pt;height:80pt">'
+            . '<ol style="width:80pt;margin:0;padding-left:20pt;align-content:first baseline"><li data-probe="percent" style="height:50%">A</li></ol>'
+            . '<ol style="width:80pt;margin:0;padding-left:20pt;align-content:first baseline"><li style="height:50%">B</li></ol>'
+            . '</div></section>', 'body {counter-reset:n}li {counter-increment:n}li:before {content:"N" counter(n)}');
+        $callbacks = 0;
+        $this->inspectEntry($dompdf, function ($item) use (&$callbacks) {
+            $before = $this->snapshot($item->get_root());
+            $page = $this->pageState($item->get_root());
+            $count = $callbacks;
+            $context = new FlexLayoutContext($item, true, null);
+            $geometry = null;
+            foreach ([1, 2] as $repeat) {
+                $result = $context->layout();
+                $this->assertNull($result["continuation"]);
+                $this->assertEquals(80, $result["consumed_block_size"]);
+                [$text, $bullets] = $this->content($result["fragment"]);
+                $this->assertSame("N1AN2B", implode("", $text));
+                $this->assertSame(["1", "1"], $bullets);
+                foreach ($result["fragment"]->get_subtree() as $child) {
+                    if ($child->get_node() instanceof DOMElement && $child->get_node()->getAttribute("data-probe") === "percent") {
+                        $box = $child->get_content_box();
+                        $this->assertEquals(40, $box["h"]);
+                        if ($geometry !== null) {
+                            $this->assertSame($geometry, $box);
+                        }
+                        $geometry = $box;
+                    }
+                }
+                $this->assertSame($before, $this->snapshot($item->get_root()));
+                $this->assertSame($page, $this->pageState($item->get_root()));
+                $this->assertSame($count, $callbacks);
+            }
+            $this->assertNotNull($geometry);
+        }, function () use (&$callbacks) {
+            $callbacks++;
+        });
+        $this->assertGreaterThan(0, $callbacks);
+    }
+
+    public function testNativeLineRemovalRecomputesAndClearsFlexMetricParticipation(): void
+    {
+        $dompdf = $this->document('<section id="item">BEFORE<span style="display:inline-flex;width:40pt;height:60pt"><span>FLEX</span></span>AFTER</section>');
+        $this->inspectEntry($dompdf, function ($item) {
+            $before = $this->snapshot($item->get_root());
+            $fragment = (new FlexLayoutContext($item, true, null))->layout()["fragment"];
+            $line = $fragment->get_line_boxes()[0];
+            $this->assertNotNull($line->baseline);
+            $this->assertGreaterThanOrEqual(60, $line->h);
+            $flexIndex = null;
+            foreach ($line->get_frames() as $index => $frame) {
+                if ($frame instanceof \Dompdf\FrameDecorator\Flex) {
+                    $flexIndex = $index;
+                    break;
+                }
+            }
+            $this->assertNotNull($flexIndex);
+            $line->remove_frames($flexIndex);
+            $this->assertNull($line->baseline);
+            $this->assertEqualsWithDelta(19.8, $line->h, 0.01);
+            $line->remove_frames(0);
+            $this->assertNull($line->baseline);
+            $this->assertEquals(0, $line->h);
+            $this->assertSame($before, $this->snapshot($item->get_root()));
+        });
+    }
+
     public function testPreparedListCopiesKeepOnlyActualMarkerAndContent(): void
     {
         $dompdf = $this->document('<div style="display:flex;width:200pt"><section id="item" style="width:100pt;flex:none"><ol><li>ONE</li></ol></section></div>');

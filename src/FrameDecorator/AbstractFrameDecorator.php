@@ -652,6 +652,12 @@ abstract class AbstractFrameDecorator extends Frame
         return $this->_root;
     }
 
+    /** Horizontal baseline offset from this frame's position; null means absent. */
+    public function get_baseline(bool $last = false): ?float
+    {
+        return null;
+    }
+
     public function get_flex_layout(): ?array
     {
         $context = $this->_root ? $this->_root->get_flex_context() : null;

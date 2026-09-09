@@ -118,6 +118,15 @@ class Text extends AbstractFrameDecorator
 
     //........................................................................
 
+    public function get_baseline(bool $last = false): ?float
+    {
+        if ($this->get_text() === "") {
+            return null;
+        }
+        $style = $this->get_style();
+        return $this->_dompdf->getFontMetrics()->getFontBaseline($style->font_family, $style->font_size);
+    }
+
     /**
      * Vertical padding, border, and margin do not apply when determining the
      * height for inline frames.

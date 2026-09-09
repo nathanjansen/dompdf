@@ -28,8 +28,15 @@ class FlexTest extends TestCase
                     "content" => [$content["x"], $content["y"], $content["w"], $content["h"]],
                     "class" => get_class($frame), "block" => $frame->is_block(),
                     "cb_width" => $frame->get_containing_block("w"),
+                    "margins" => [$frame->get_style()->margin_top, $frame->get_style()->margin_right,
+                        $frame->get_style()->margin_bottom, $frame->get_style()->margin_left],
                     "specified_width" => $frame->get_style()->get_specified("width")
                 ];
+                if ($frame instanceof \Dompdf\FrameDecorator\Block) {
+                    $boxes[$node->getAttribute("data-test")][count($boxes[$node->getAttribute("data-test")]) - 1]["lines"] = array_map(function ($line) {
+                        return [$line->y, $line->h];
+                    }, $frame->get_line_boxes());
+                }
                 if ($frame instanceof \Dompdf\FrameDecorator\Flex) {
                     $source = [];
                     foreach ($frame->get_children() as $child) {
@@ -39,7 +46,9 @@ class FlexTest extends TestCase
                 }
             }
             if ($frame->is_text_node() && trim($node->nodeValue) !== "") {
-                $text[$page][] = [trim($node->nodeValue), $frame->get_position("x"), $frame->get_position("y")];
+                $style = $frame->get_style();
+                $baseline = $frame->get_position("y") + $frame->get_dompdf()->getFontMetrics()->getFontBaseline($style->font_family, $style->font_size);
+                $text[$page][] = [trim($node->nodeValue), $frame->get_position("x"), $frame->get_position("y"), $baseline];
             }
             if ($node->nodeName === "bullet") {
                 $bullets[] = $node->getAttribute("dompdf-counter");
@@ -58,6 +67,541 @@ class FlexTest extends TestCase
         foreach ($expected as $axis => $value) {
             $this->assertEqualsWithDelta($value, $result["boxes"][$id][$fragment]["box"][$axis], 0.01, "$id axis $axis");
         }
+    }
+
+    public static function alignmentGeometryProvider(): array
+    {
+        return [
+            "G01 center" => ["width:300pt;height:20pt;justify-content:center", ["", ""], [[50, 0], [150, 0]]],
+            "G02 between" => ["width:300pt;height:20pt;justify-content:space-between", ["", ""], [[0, 0], [200, 0]]],
+            "G03 around" => ["width:300pt;height:20pt;justify-content:space-around", ["", ""], [[25, 0], [175, 0]]],
+            "singleton between" => ["width:300pt;height:20pt;justify-content:space-between", [""], [[0, 0]]],
+            "negative between" => ["width:150pt;height:20pt;justify-content:space-between", ["", ""], [[0, 0], [100, 0]]],
+            "negative around safe fallback" => ["width:150pt;height:20pt;justify-content:space-around", ["", ""], [[0, 0], [100, 0]]],
+            "G04 main auto edge" => ["width:300pt;height:20pt;justify-content:space-between", ["", "margin-left:auto"], [[0, 0], [200, 0]]],
+            "multiple auto edges" => ["width:500pt;height:20pt", ["margin-left:auto", "margin-left:auto", "margin-right:auto"], [[66.666667, 0], [233.333333, 0], [333.333333, 0]]],
+            "cross auto overrides self" => ["width:200pt;height:80pt;align-items:center", ["margin-top:auto;margin-bottom:auto;align-self:flex-end"], [[0, 30]]],
+            "G09 center and self end" => ["width:200pt;height:80pt;align-items:center", ["", "align-self:flex-end"], [[0, 30], [100, 60]]],
+            "line packing between" => ["width:100pt;height:100pt;flex-wrap:wrap;align-content:space-between", ["", ""], [[0, 0], [0, 80]]],
+            "line packing center" => ["width:100pt;height:100pt;flex-wrap:wrap;align-content:center", ["", ""], [[0, 30], [0, 50]]],
+            "one actual wrapped line" => ["width:300pt;height:100pt;flex-wrap:wrap;align-content:center", ["", ""], [[0, 40], [100, 40]]],
+            "nowrap ignores packing" => ["width:300pt;height:100pt;align-content:center", ["", ""], [[0, 0], [100, 0]]]
+            , "even distribution" => ["width:300pt;height:20pt;justify-content:space-evenly", ["", ""], [[33.333333, 0], [166.666667, 0]]]
+            , "reverse logical start" => ["width:300pt;height:20pt;flex-direction:row-reverse;justify-content:start", ["", ""], [[100, 0], [0, 0]]]
+            , "reverse logical end" => ["width:300pt;height:20pt;flex-direction:row-reverse;justify-content:end", ["", ""], [[200, 0], [100, 0]]]
+            , "RTL physical left" => ["width:300pt;height:20pt;direction:rtl;justify-content:left", ["", ""], [[100, 0], [0, 0]]]
+            , "LTR physical right" => ["width:300pt;height:20pt;justify-content:right", ["", ""], [[100, 0], [200, 0]]]
+            , "safe overflow center" => ["width:150pt;height:20pt;justify-content:safe center", ["", ""], [[0, 0], [100, 0]]]
+            , "unsafe overflow center" => ["width:150pt;height:20pt;justify-content:unsafe center", ["", ""], [[-25, 0], [75, 0]]]
+            , "wrapped logical start" => ["width:100pt;height:100pt;flex-wrap:wrap-reverse;align-content:start", ["", ""], [[0, 20], [0, 0]]]
+            , "self direction start" => ["width:200pt;height:40pt;flex-direction:column;align-items:start", ["direction:rtl;align-self:self-start", "align-self:self-end"], [[100, 0], [100, 20]]]
+            , "column first baseline self fallback" => ["width:200pt;height:40pt;direction:rtl;flex-direction:column;align-items:first baseline", ["direction:ltr"], [[0, 0]]]
+            , "column last baseline safe fallback" => ["width:50pt;height:40pt;flex-direction:column;align-items:last baseline", ["direction:ltr"], [[0, 0]]]
+            , "reverse safe overflow" => ["width:150pt;height:20pt;flex-direction:row-reverse;justify-content:safe center", ["", ""], [[50, 0], [-50, 0]]]
+            , "reverse negative between" => ["width:150pt;height:20pt;flex-direction:row-reverse;justify-content:space-between", ["", ""], [[50, 0], [-50, 0]]]
+            , "reverse negative around" => ["width:150pt;height:20pt;flex-direction:row-reverse;justify-content:space-around", ["", ""], [[50, 0], [-50, 0]]]
+            , "reverse negative evenly" => ["width:150pt;height:20pt;flex-direction:row-reverse;justify-content:space-evenly", ["", ""], [[50, 0], [-50, 0]]]
+            , "reverse cross safe overflow" => ["width:100pt;height:30pt;flex-wrap:wrap-reverse;align-content:safe center", ["", ""], [[0, 10], [0, -10]]]
+        ];
+    }
+
+    /** @dataProvider alignmentGeometryProvider */
+    #[\PHPUnit\Framework\Attributes\DataProvider('alignmentGeometryProvider')]
+    public function testPublicAlignmentGeometry(string $container, array $styles, array $expected): void
+    {
+        $html = '<div style="display:flex;align-items:flex-start;' . $container . '">';
+        foreach ($styles as $index => $style) {
+            $html .= '<div data-test="item' . $index . '" style="flex:none;width:100pt;height:20pt;' . $style . '"></div>';
+        }
+        $result = $this->layout($html . '</div>', '@page {size:600pt 400pt}', 1);
+        foreach ($expected as $index => $position) {
+            $this->assertBox($result, "item" . $index, array_merge($position, [100, 20]));
+        }
+        $this->assertSame(1, $result["pages"]);
+    }
+
+    public function testColumnAutoCrossSizeUsesNativeFitContentBeforeStretch(): void
+    {
+        $result = $this->layout('<div style="display:flex;flex-direction:column;width:200pt;align-items:flex-start;font:10pt/20pt Courier">'
+            . '<div data-test="fit" style="flex:none">M</div>'
+            . '<div data-test="stretch" style="flex:none;align-self:stretch">M</div></div>', '', 1);
+        $this->assertBox($result, "fit", [0, 0, 6]);
+        $this->assertEqualsWithDelta(200, $result["boxes"]["stretch"][0]["content"][2], 0.01);
+    }
+
+    public function testFirstContentBaselineSharesNativeGroupAndGrowsAutoBox(): void
+    {
+        foreach (["block", "flex"] as $display) {
+            $result = $this->layout('<div data-test="row" style="display:flex;width:200pt;align-items:flex-start">'
+                . '<div data-test="A" style="display:' . $display . ';width:100pt;align-content:first baseline">'
+                . '<div data-test="a-line" style="height:10pt;line-height:10pt">A</div></div>'
+                . '<div data-test="B" style="width:100pt;padding-top:10pt;align-content:first baseline">'
+                . '<div data-test="b-line" style="height:10pt;line-height:10pt">B</div></div></div>', '', 1);
+            $this->assertBox($result, "A", [0, 0, 100, 20]);
+            $this->assertBox($result, "B", [100, 0, 100, 20]);
+            $this->assertEqualsWithDelta(10, $result["boxes"]["a-line"][0]["box"][1], 0.01);
+            $this->assertEqualsWithDelta(10, $result["boxes"]["b-line"][0]["box"][1], 0.01);
+            $this->assertEqualsWithDelta($result["text"][1][0][3], $result["text"][1][1][3], 0.01);
+        }
+    }
+
+    public function testLastContentBaselineResolvesLeadingSpaceBeforeNativeLayout(): void
+    {
+        $result = $this->layout('<div style="display:flex;width:200pt;align-items:flex-end">'
+            . '<div data-test="A" style="width:100pt;height:40pt;box-sizing:border-box;align-content:last baseline">'
+            . '<div data-test="a-line" style="height:10pt;line-height:10pt">A</div></div>'
+            . '<div data-test="B" style="width:100pt;height:40pt;box-sizing:border-box;padding-bottom:10pt;align-content:last baseline">'
+            . '<div data-test="b-line" style="height:10pt;line-height:10pt">B</div></div></div>', '', 1);
+        $this->assertBox($result, "A", [0, 0, 100, 40]);
+        $this->assertBox($result, "B", [100, 0, 100, 40]);
+        $this->assertBox($result, "a-line", [0, 20, 100, 10]);
+        $this->assertBox($result, "b-line", [100, 20, 100, 10]);
+        $this->assertEqualsWithDelta($result["text"][1][0][3], $result["text"][1][1][3], 0.01);
+    }
+
+    public function testContentBaselineSharesSelfGroupButNotCenteredItem(): void
+    {
+        $result = $this->layout('<div style="display:flex;width:300pt;height:40pt;align-items:flex-start">'
+            . '<div data-test="A" style="width:100pt;align-content:first baseline"><div data-test="a-line" style="height:10pt;line-height:10pt">A</div></div>'
+            . '<div data-test="B" style="width:100pt;padding-top:10pt;align-self:first baseline"><div style="height:10pt;line-height:10pt">B</div></div>'
+            . '<div data-test="C" style="width:100pt;align-self:center;align-content:first baseline"><div data-test="c-line" style="height:10pt;line-height:10pt">C</div></div></div>', '', 1);
+        $this->assertBox($result, "A", [0, 0, 100, 20]);
+        $this->assertBox($result, "a-line", [0, 10, 100, 10]);
+        $this->assertBox($result, "C", [200, 15, 100, 10]);
+        $this->assertBox($result, "c-line", [200, 15, 100, 10]);
+        $this->assertEqualsWithDelta($result["text"][1][0][3], $result["text"][1][1][3], 0.01);
+        $this->assertEqualsWithDelta(5, $result["text"][1][2][3] - $result["text"][1][0][3], 0.01);
+    }
+
+    public function testContentBaselineUsesFinalStretchPercentageContent(): void
+    {
+        $result = $this->layout('<div style="display:flex;width:200pt;height:80pt">'
+            . '<div data-test="A" style="width:100pt;align-content:first baseline"><div data-test="percent" style="height:50%"></div>'
+            . '<div data-test="a-line" style="height:10pt;line-height:10pt">A</div></div>'
+            . '<div data-test="B" style="width:100pt;padding-top:10pt;align-content:first baseline">'
+            . '<div data-test="b-line" style="height:10pt;line-height:10pt">B</div></div></div>', '', 1);
+        $this->assertBox($result, "A", [0, 0, 100, 80]);
+        $this->assertBox($result, "B", [100, 0, 100, 80]);
+        $this->assertBox($result, "percent", [0, 0, 100, 40]);
+        $this->assertBox($result, "a-line", [0, 40, 100, 10]);
+        $this->assertBox($result, "b-line", [100, 40, 100, 10]);
+        $this->assertEqualsWithDelta($result["text"][1][0][3], $result["text"][1][1][3], 0.01);
+    }
+
+    public function testFinalContentBaselineGrowthPrecedesPeerCrossPlacementAndAutoMargins(): void
+    {
+        foreach (["align-self:flex-end", "align-self:center;margin-top:auto"] as $alignment) {
+            $result = $this->layout('<div style="display:flex;width:200pt;height:80pt">'
+                . '<div data-test="A" style="width:100pt;align-content:last baseline"><div data-test="a-line" style="height:10pt;line-height:10pt">A</div>'
+                . '<div data-test="percent" style="height:50%"></div></div>'
+                . '<div data-test="B" style="width:100pt;padding-bottom:20pt;align-content:last baseline;' . $alignment . '">'
+                . '<div data-test="b-line" style="height:10pt;line-height:10pt">B</div></div></div>'
+                . '<div data-test="after" style="height:20pt">AFTER</div>', '', 1);
+            $this->assertBox($result, "A", [0, 0, 100, 80]);
+            $this->assertBox($result, "a-line", [0, 30, 100, 10]);
+            $this->assertBox($result, "percent", [0, 40, 100, 40]);
+            $this->assertBox($result, "B", [100, 30, 100, 50]);
+            $this->assertBox($result, "b-line", [100, 30, 100, 10]);
+            $this->assertBox($result, "after", [0, 80, 400, 20]);
+            $this->assertEqualsWithDelta(37.92, $result["text"][1][0][3], 0.01);
+            $this->assertEqualsWithDelta(37.92, $result["text"][1][1][3], 0.01);
+            $this->assertEquals(strpos($alignment, "margin-top") !== false ? 30 : 0, $result["boxes"]["B"][0]["margins"][0]);
+        }
+    }
+
+    public function testContentBaselineCoordinationUsesActualSafeAndStretchEdges(): void
+    {
+        foreach (["safe self-end", "stretch"] as $alignment) {
+            $result = $this->layout('<div style="display:flex;width:200pt;height:60pt;align-items:' . $alignment . '">'
+                . '<div data-test="A" style="width:100pt;height:40pt;box-sizing:border-box;align-content:last baseline"><div data-test="a-line" style="height:10pt;line-height:10pt">A</div></div>'
+                . '<div data-test="B" style="width:100pt;height:40pt;box-sizing:border-box;padding-bottom:10pt;align-content:last baseline"><div data-test="b-line" style="height:10pt;line-height:10pt">B</div></div></div>', '', 1);
+            $this->assertBox($result, "A", [0, 20, 100, 40]);
+            $this->assertBox($result, "B", [100, 20, 100, 40]);
+            $this->assertBox($result, "a-line", [0, 40, 100, 10]);
+            $this->assertBox($result, "b-line", [100, 40, 100, 10]);
+        }
+        $result = $this->layout('<div style="display:flex;width:200pt;height:60pt;flex-wrap:wrap-reverse">'
+            . '<div data-test="A" style="width:100pt;height:40pt;align-content:first baseline"><div data-test="a-line" style="height:10pt;line-height:10pt">A</div></div>'
+            . '<div data-test="B" style="width:100pt;height:40pt;box-sizing:border-box;padding-top:10pt;align-content:first baseline"><div data-test="b-line" style="height:10pt;line-height:10pt">B</div></div></div>', '', 1);
+        $this->assertBox($result, "A", [0, 0, 100, 40]);
+        $this->assertBox($result, "B", [100, 0, 100, 40]);
+        $this->assertBox($result, "a-line", [0, 10, 100, 10]);
+        $this->assertBox($result, "b-line", [100, 10, 100, 10]);
+    }
+
+    public function testContentBaselineLeadingSpaceIsConsumedOnceAcrossPages(): void
+    {
+        $children = '';
+        for ($i = 1; $i <= 8; $i++) {
+            $children .= '<div data-test="line' . $i . '" style="height:20pt">A' . $i . '</div>';
+        }
+        $result = $this->layout('<div style="display:flex;width:200pt;align-items:flex-start">'
+            . '<div data-test="A" style="width:100pt;align-content:first baseline">' . $children . '</div>'
+            . '<div style="width:100pt;padding-top:20pt;align-content:first baseline"><div style="height:20pt">B</div></div></div>'
+            . '<div data-test="after" style="height:20pt">AFTER</div>', '@page {size:200pt 100pt}', 2);
+        $this->assertSame(['A1', 'A2', 'A3', 'A4', 'B'], array_column($result["text"][1], 0));
+        $this->assertSame(['A5', 'A6', 'A7', 'A8', 'AFTER'], array_column($result["text"][2], 0));
+        $this->assertBox($result, "line1", [0, 20, 100, 20]);
+        $this->assertBox($result, "line5", [0, 0, 100, 20]);
+        $this->assertBox($result, "A", [0, 0, 100, 100]);
+        $this->assertBox($result, "A", [0, 0, 100, 80], 1);
+        $this->assertBox($result, "after", [0, 80, 200, 20]);
+    }
+
+    public function testLastContentBaselineTailBelongsOnlyToFinalFragment(): void
+    {
+        $result = $this->layout('<div style="display:flex;width:200pt;align-items:flex-end">'
+            . '<div data-test="A" style="width:100pt;align-content:last baseline"><div style="height:20pt">A1</div>'
+            . '<div style="height:20pt;page-break-before:always">A2</div></div>'
+            . '<div style="width:100pt;padding-bottom:10pt;align-content:last baseline"><div style="height:20pt">B</div></div></div>'
+            . '<div data-test="after" style="height:20pt">AFTER</div>', '@page {size:200pt 100pt}', 2);
+        $this->assertSame(['A1', 'B'], array_column($result["text"][1], 0));
+        $this->assertSame(['A2', 'AFTER'], array_column($result["text"][2], 0));
+        $this->assertBox($result, "A", [0, 0, 100, 20]);
+        $this->assertBox($result, "A", [0, 0, 100, 30], 1);
+        $this->assertBox($result, "after", [0, 30, 200, 20]);
+    }
+
+    public function testStretchedImageRetainsAssignedMainSizeAndPercentageChildReference(): void
+    {
+        $result = $this->layout('<div style="display:flex;width:200pt;height:80pt">'
+            . '<img data-test="image" style="flex:0 0 80pt;min-width:0;width:200pt" src="' . $this->image() . '">'
+            . '<div data-test="item" style="flex:0 0 100pt;box-sizing:border-box;padding:5pt;border:5pt solid">'
+            . '<img data-test="child" style="width:20pt;height:50%" src="' . $this->image() . '"></div></div>', '', 1);
+        $this->assertBox($result, "image", [0, 0, 80, 80]);
+        $this->assertSame("200pt", $result["boxes"]["image"][0]["specified_width"]);
+        $this->assertBox($result, "item", [80, 0, 100, 80]);
+        $this->assertBox($result, "child", [90, 10, 20, 30]);
+    }
+
+    public function testNativeInlineBlockDonatesLastBaselineBesideInlineFlex(): void
+    {
+        $result = $this->layout('<div data-test="line">BEFORE<span style="display:inline-block;width:60pt">IBFIRST<br>IBLAST</span>'
+            . '<span style="display:inline-flex;width:40pt"><span>A</span></span>AFTER<br><span data-test="next">NEXT</span></div>', '', 1);
+        $ink = array_column($result["text"][1], null, 0);
+        foreach (["BEFORE", "A", "AFTER"] as $token) {
+            $this->assertEqualsWithDelta($ink["IBLAST"][3], $ink[$token][3], 0.01, $token);
+        }
+        $this->assertEqualsWithDelta(19.8, $ink["IBLAST"][3] - $ink["IBFIRST"][3], 0.01);
+        $this->assertGreaterThanOrEqual(39.6, $result["boxes"]["line"][0]["lines"][0][1]);
+        $this->assertGreaterThanOrEqual($result["boxes"]["line"][0]["lines"][0][1], $ink["NEXT"][2]);
+    }
+
+    public function testInlineBlockNonvisibleOverflowUsesMarginBottomBesideInlineFlex(): void
+    {
+        foreach (["hidden", "scroll", "auto", "visible"] as $overflow) {
+            $result = $this->layout('<div data-test="line">BEFORE<span data-test="ib" style="display:inline-block;width:60pt;height:40pt;margin-bottom:5pt;overflow:' . $overflow . '">IB</span>'
+                . '<span style="display:inline-flex;width:60pt;height:20pt"><span>A</span></span>AFTER<br>NEXT</div>', '', 1);
+            $ink = array_column($result["text"][1], null, 0);
+            $box = $result["boxes"]["ib"][0]["box"];
+            $expected = $overflow === "visible" ? $ink["IB"][3] : $box[1] + $box[3] + 5;
+            foreach (["BEFORE", "A", "AFTER"] as $token) {
+                $this->assertEqualsWithDelta($expected, $ink[$token][3], 0.01, $overflow . " " . $token);
+            }
+            $this->assertGreaterThanOrEqual($box[1] + $box[3] + 5, $ink["NEXT"][2]);
+        }
+    }
+
+    public function testBlockLineDonationUsesHiddenAtomicBottomWithoutChangingBlockItemBaseline(): void
+    {
+        foreach (["hidden", "visible"] as $overflow) {
+            $result = $this->layout('<div style="display:flex;width:200pt;align-items:baseline"><div style="width:100pt">'
+                . '<span data-test="ib" style="display:inline-block;width:60pt;height:40pt;overflow:' . $overflow . '">IB</span>'
+                . '</div><div style="width:100pt">PEER</div></div>', '', 1);
+            $ink = array_column($result["text"][1], null, 0);
+            $box = $result["boxes"]["ib"][0]["box"];
+            $expected = $overflow === "hidden" ? $box[1] + $box[3] : $ink["IB"][3];
+            $this->assertEqualsWithDelta($expected, $ink["PEER"][3], 0.01);
+        }
+    }
+
+    public function testInlineFlexExportsCoordinatedContentGroupInsteadOfStartmostNonparticipant(): void
+    {
+        $result = $this->layout('<div>BEFORE<span style="display:inline-flex;width:180pt;height:60pt;align-items:flex-start">'
+            . '<span style="width:60pt;height:10pt;align-self:center;line-height:10pt">C</span>'
+            . '<span style="width:60pt;align-content:first baseline"><span style="display:block;height:10pt;line-height:10pt">A</span></span>'
+            . '<span style="width:60pt;padding-top:10pt;align-content:first baseline"><span style="display:block;height:10pt;line-height:10pt">B</span></span>'
+            . '</span>AFTER</div>', '', 1);
+        $ink = array_column($result["text"][1], null, 0);
+        foreach (["BEFORE", "B", "AFTER"] as $token) {
+            $this->assertEqualsWithDelta($ink["A"][3], $ink[$token][3], 0.01, $token);
+        }
+        $this->assertEqualsWithDelta(15, $ink["C"][3] - $ink["A"][3], 0.01);
+    }
+
+    public function testInlineFlexBaselineDonorFollowsPhysicalStartAfterOrderAndDirection(): void
+    {
+        foreach ([["row", "order:1", "B"], ["row-reverse", "", "B"], ["column-reverse", "", "B"],
+            ["row;direction:rtl", "", "A"]] as [$direction, $order, $donor]) {
+            $result = $this->layout('<div>BEFORE<span style="display:inline-flex;width:100pt;height:60pt;flex-direction:' . $direction . ';align-items:flex-start">'
+                . '<span style="flex:none;width:40pt;height:20pt;align-self:flex-end;' . $order . '">A</span>'
+                . '<span style="flex:none;width:40pt;height:20pt">B</span></span>AFTER</div>', '', 1);
+            $ink = array_column($result["text"][1], null, 0);
+            $this->assertEqualsWithDelta($ink[$donor][3], $ink["BEFORE"][3], 0.01, $direction);
+            $this->assertEqualsWithDelta($ink[$donor][3], $ink["AFTER"][3], 0.01, $direction);
+        }
+        $result = $this->layout('<div>BEFORE<span data-test="empty" style="display:inline-flex;width:10pt;height:30pt"></span>AFTER</div>', '', 1);
+        $ink = array_column($result["text"][1], null, 0);
+        $box = $result["boxes"]["empty"][0]["box"];
+        $this->assertEqualsWithDelta($box[1] + $box[3], $ink["BEFORE"][3], 0.01);
+        $this->assertEqualsWithDelta($ink["BEFORE"][3], $ink["AFTER"][3], 0.01);
+    }
+
+    public function testCoincidentZeroWidthDonorsRetainOrderModifiedOrdinal(): void
+    {
+        $items = '<span style="flex:none;width:0;min-width:0;order:1;font:20pt/40pt Times-Roman;white-space:nowrap">A</span>'
+            . '<span style="flex:none;width:0;min-width:0;order:0;font:10pt/20pt Times-Roman;white-space:nowrap">B</span>';
+        $result = $this->layout('<div>BEFORE<span style="display:inline-flex;width:0;height:60pt;align-items:flex-start">' . $items . '</span>AFTER</div>', '', 1);
+        $ink = array_column($result["text"][1], null, 0);
+        $this->assertEqualsWithDelta($ink["A"][1], $ink["B"][1], 0.01);
+        $this->assertEqualsWithDelta($ink["B"][3], $ink["BEFORE"][3], 0.01);
+        $this->assertEqualsWithDelta($ink["B"][3], $ink["AFTER"][3], 0.01);
+        $this->assertEqualsWithDelta(15.84, $ink["A"][3] - $ink["B"][3], 0.01);
+        $result = $this->layout('<div style="display:flex;width:200pt;align-items:last baseline">'
+            . '<div style="display:flex;flex:none;width:0;height:60pt;align-items:flex-start">' . $items . '</div>'
+            . '<div style="width:100pt">PEER</div></div>', '', 1);
+        $ink = array_column($result["text"][1], null, 0);
+        $this->assertEqualsWithDelta($ink["A"][3], $ink["PEER"][3], 0.01);
+    }
+
+    public function testBlockExportsLineBaselineDespiteShiftedAtomicFirstParticipant(): void
+    {
+        foreach ([false, true] as $withFlex) {
+            $result = $this->layout('<div style="display:flex;width:200pt;align-items:baseline">'
+                . '<div style="width:100pt"><span style="display:inline-block;width:20pt;height:20pt;vertical-align:5pt">I</span>'
+                . ($withFlex ? '<span style="display:inline-flex;width:20pt;height:10pt"><span>F</span></span>' : '')
+                . 'X</div><div style="width:100pt">PEER</div></div>', '', 1);
+            $ink = array_column($result["text"][1], null, 0);
+            $this->assertEqualsWithDelta($ink["X"][3], $ink["PEER"][3], 0.01);
+        }
+    }
+
+    public function testStretchInstallsDefiniteContentHeightAndClampsCrossSize(): void
+    {
+        $result = $this->layout('<div style="display:flex;width:300pt;height:80pt">'
+            . '<div data-test="A" style="flex:none;width:100pt"><div data-test="child" style="height:50%"></div></div>'
+            . '<div data-test="B" style="flex:none;width:100pt;max-height:50pt"></div>'
+            . '<div data-test="C" style="flex:none;width:100pt;min-height:90pt"></div></div>', '', 1);
+        $this->assertBox($result, "A", [0, 0, 100, 80]);
+        $this->assertBox($result, "child", [0, 0, 100, 40]);
+        $this->assertBox($result, "B", [100, 0, 100, 50]);
+        $this->assertBox($result, "C", [200, 0, 100, 90]);
+    }
+
+    public function testFlexBaselineUsesActualFirstTextAndCombinedAscentDescent(): void
+    {
+        $result = $this->layout('<div data-test="flex" style="display:flex;width:100pt;align-items:baseline">'
+            . '<div data-test="A" style="flex:none;width:40pt;font:10pt/20pt Times-Roman;padding-top:20pt">A</div>'
+            . '<div data-test="B" style="flex:none;width:40pt;font:20pt/40pt Times-Roman;padding-bottom:20pt">B</div></div>'
+            . '<div data-test="next">NEXT</div>', '', 1);
+        $this->assertSame(["A", "B", "NEXT"], array_column($result["text"][1], 0));
+        $this->assertEqualsWithDelta(35.84, $result["text"][1][0][3], 0.01);
+        $this->assertEqualsWithDelta(35.84, $result["text"][1][1][3], 0.01);
+        $this->assertBox($result, "flex", [0, 0, 100, 63.76]);
+        $this->assertBox($result, "next", [0, 63.76]);
+    }
+
+    public function testInlineFlexParticipatesInNativeBaselineAndNextLineExtent(): void
+    {
+        $result = $this->layout('<div data-test="parent"><span>BEFORE</span>'
+            . '<span data-test="flex" style="display:inline-flex;width:100pt;align-items:baseline">'
+            . '<span data-test="A" style="flex:none;width:40pt;font:10pt/20pt Times-Roman;padding-top:20pt">A</span>'
+            . '<span data-test="B" style="flex:none;width:40pt;font:20pt/40pt Times-Roman;padding-bottom:20pt">B</span></span>'
+            . '<span>AFTER</span><br><span>NEXT</span></div>', '', 1);
+        $this->assertSame(["BEFORE", "A", "B", "AFTER", "NEXT"], array_column($result["text"][1], 0));
+        foreach (array_slice($result["text"][1], 0, 4) as $text) {
+            $this->assertEqualsWithDelta(35.84, $text[3], 0.01, $text[0]);
+        }
+        $this->assertEqualsWithDelta(63.76, $result["boxes"]["parent"][0]["lines"][0][1], 0.01);
+        $this->assertEqualsWithDelta(63.76, $result["boxes"]["parent"][0]["lines"][1][0], 0.01);
+    }
+
+    public function testInlineFlexBaselineDonorDoesNotChangeWithItemCrossAlignment(): void
+    {
+        $result = $this->layout('<div><span>BEFORE</span><span style="display:inline-flex;width:100pt;height:100pt;align-items:flex-start">'
+            . '<span style="flex:none;width:40pt;height:20pt;align-self:flex-end">A</span>'
+            . '<span style="flex:none;width:40pt;height:20pt">B</span></span><span>AFTER</span><br>NEXT</div>', '', 1);
+        $text = array_column($result["text"][1], 3, 0);
+        $this->assertEqualsWithDelta(80, $text["A"] - $text["B"], 0.01);
+        $this->assertEqualsWithDelta($text["A"], $text["BEFORE"], 0.01);
+        $this->assertEqualsWithDelta($text["A"], $text["AFTER"], 0.01);
+    }
+
+    public function testFirstNativeLineDonatesItsBaselineNotRaisedTextBaseline(): void
+    {
+        $result = $this->layout('<div style="display:flex;width:200pt;align-items:baseline">'
+            . '<div style="flex:none;width:100pt"><span style="vertical-align:super">SUP</span>BASE</div>'
+            . '<div style="flex:none;width:100pt">PEER</div></div>', '', 1);
+        $text = array_column($result["text"][1], 3, 0);
+        $this->assertEqualsWithDelta($text["BASE"], $text["PEER"], 0.01);
+        $this->assertLessThan($text["BASE"], $text["SUP"]);
+    }
+
+    public function testOnlyRaisedNativeTextStillExportsTheUnraisedLineBaseline(): void
+    {
+        $result = $this->layout('<div style="display:flex;width:200pt;align-items:baseline">'
+            . '<div style="flex:none;width:100pt"><span style="vertical-align:super">SUP</span></div>'
+            . '<div style="flex:none;width:100pt">PEER</div></div>', '', 1);
+        $text = array_column($result["text"][1], 3, 0);
+        $this->assertEqualsWithDelta(15.84, $text["PEER"], 0.01);
+        $this->assertEqualsWithDelta(12.24, $text["SUP"], 0.01);
+    }
+
+    public function testLastBaselineAlignsLastNativeLinesAtEndOfCrossAllocation(): void
+    {
+        $result = $this->layout('<div style="display:flex;width:200pt;height:100pt;align-items:last baseline">'
+            . '<div data-test="A" style="flex:none;width:100pt">FIRST<br>LAST</div>'
+            . '<div data-test="B" style="flex:none;width:100pt">PEER</div></div>', '', 1);
+        $text = array_column($result["text"][1], 3, 0);
+        $this->assertEqualsWithDelta(96.04, $text["LAST"], 0.01);
+        $this->assertEqualsWithDelta($text["LAST"], $text["PEER"], 0.01);
+        $this->assertBox($result, "A", [0, 60.4, 100, 39.6]);
+        $this->assertBox($result, "B", [100, 80.2, 100, 19.8]);
+    }
+
+    public function testLastBaselineOverflowFallbackMovesWholeGroupToSafeStart(): void
+    {
+        $result = $this->layout('<div style="display:flex;width:200pt;height:20pt;align-items:last baseline">'
+            . '<div data-test="A" style="flex:none;width:100pt">FIRST<br>LAST</div>'
+            . '<div data-test="B" style="flex:none;width:100pt">PEER</div></div>', '', 1);
+        $text = array_column($result["text"][1], 3, 0);
+        $this->assertEqualsWithDelta(35.64, $text["LAST"], 0.01);
+        $this->assertEqualsWithDelta($text["LAST"], $text["PEER"], 0.01);
+        $this->assertBox($result, "A", [0, 0, 100, 39.6]);
+        $this->assertBox($result, "B", [100, 19.8, 100, 19.8]);
+    }
+
+    public function testCrossAutoMarginsPreservePhysicalOverflowStartAndUsedEdges(): void
+    {
+        foreach (["margin-top:auto;margin-bottom:auto" => [0, -20, 0], "margin-top:auto;margin-bottom:5pt" => [0, -20, 0],
+            "margin-top:5pt;margin-bottom:auto" => [5, -25, 5]] as $margins => $expected) {
+            $result = $this->layout('<div style="display:flex;width:100pt;height:20pt;align-items:flex-end">'
+                . '<div data-test="item" style="flex:none;width:100pt;height:40pt;' . $margins . '">A</div></div>', '', 1);
+            $this->assertBox($result, "item", [0, $expected[2], 100, 40]);
+            $this->assertEqualsWithDelta($expected[0], $result["boxes"]["item"][0]["margins"][0], 0.01);
+            $this->assertEqualsWithDelta($expected[1], $result["boxes"]["item"][0]["margins"][2], 0.01);
+        }
+    }
+
+    public function testResolvedAutoMarginsArePerEdgeAndNotCountedTwice(): void
+    {
+        $result = $this->layout('<div style="display:flex;width:500pt;height:80pt;justify-content:center">'
+            . '<div data-test="A" style="flex:none;width:100pt;height:20pt;margin-left:auto;margin-right:auto;margin-top:auto;margin-bottom:auto">A</div>'
+            . '<div data-test="B" style="flex:none;width:100pt;height:20pt;margin-left:auto">B</div></div>', '@page {size:600pt 400pt}', 1);
+        $this->assertBox($result, "A", [100, 30, 100, 20]);
+        $this->assertBox($result, "B", [400, 0, 100, 20]);
+        $this->assertEquals([30, 100, 30, 100], $result["boxes"]["A"][0]["margins"]);
+        $this->assertEquals([0, 0, 0, 100], $result["boxes"]["B"][0]["margins"]);
+        $this->assertEqualsWithDelta(100, $result["text"][1][0][1], 0.01);
+    }
+
+    public function testAlignedWrappedRowsAndColumnsKeepOriginalSlotsOnContinuation(): void
+    {
+        foreach (["row" => ["width:250pt;justify-content:center;flex-wrap:wrap", 100, 40,
+                [[25, 0], [125, 0], [25, 40], [125, 40], [25, 0], [125, 0]], ["ABCD", "EFAFTER"]],
+            "column" => ["width:200pt;height:160pt;flex-direction:column;justify-content:center;align-items:center", 100, 20,
+                [[50, 20], [50, 40], [50, 60], [50, 80], [50, 0], [50, 20]], ["ABCD", "EFAFTER"]]] as $axis => $case) {
+            [$style, $width, $height, $positions, $tokens] = $case;
+            $html = '<div style="display:flex;align-content:flex-start;align-items:flex-start;' . $style . '">';
+            foreach (str_split("ABCDEF") as $letter) {
+                $html .= '<div data-test="' . $letter . '" style="flex:none;width:' . $width . 'pt;height:' . $height . 'pt">' . $letter . '</div>';
+            }
+            $result = $this->layout($html . '</div><div data-test="after" style="height:20pt">AFTER</div>', '@page {size:300pt 100pt}', 2);
+            foreach (str_split("ABCDEF") as $index => $letter) {
+                $this->assertBox($result, $letter, $positions[$index]);
+            }
+            $this->assertSame($tokens[0], implode("", array_column($result["text"][1], 0)), $axis);
+            $this->assertSame($tokens[1], implode("", array_column($result["text"][2], 0)), $axis);
+        }
+    }
+
+    public function testPartialAutoMarginSuffixDoesNotRepeatConsumedTopAllocation(): void
+    {
+        $html = '<div style="display:flex;width:100pt;height:200pt;align-items:flex-start">'
+            . '<div data-test="item" style="flex:none;width:100pt;margin-top:auto;margin-bottom:0">';
+        for ($i = 1; $i <= 8; $i++) {
+            $html .= '<div style="height:20pt;page-break-inside:avoid">A' . $i . '</div>';
+        }
+        $result = $this->layout($html . '</div></div><div style="height:20pt">AFTER</div>', '@page {size:200pt 100pt}', 3);
+        $this->assertSame("A1A2A3", implode("", array_column($result["text"][1], 0)));
+        $this->assertSame("A4A5A6A7A8", implode("", array_column($result["text"][2], 0)));
+        $this->assertEqualsWithDelta(40, $result["boxes"]["item"][0]["margins"][0], 0.01);
+        $this->assertEqualsWithDelta(0, $result["boxes"]["item"][1]["margins"][0], 0.01);
+        $this->assertSame("AFTER", implode("", array_column($result["text"][3], 0)));
+    }
+
+    public function testWholeDeferredAlignedItemKeepsUnconsumedAutoMarginAndSlot(): void
+    {
+        $result = $this->layout('<div style="height:40pt">LEAD</div><div style="display:flex;width:200pt">'
+            . '<div data-test="A" style="flex:none;width:100pt;height:20pt;margin-top:auto;page-break-inside:avoid">A</div>'
+            . '<div data-test="B" style="flex:none;width:100pt;height:80pt;page-break-inside:avoid">B</div></div>'
+            . '<div data-test="after" style="height:20pt">AFTER</div>', '@page {size:200pt 100pt}', 2);
+        $this->assertSame(['LEAD'], array_column($result["text"][1], 0));
+        $this->assertSame(['A', 'B', 'AFTER'], array_column($result["text"][2], 0));
+        $this->assertSame(2, $result["boxes"]["A"][0]["page"]);
+        $this->assertBox($result, "A", [0, 60, 100, 20]);
+        $this->assertEquals(60, $result["boxes"]["A"][0]["margins"][0]);
+        $this->assertBox($result, "B", [100, 0, 100, 80]);
+        $this->assertBox($result, "after", [0, 80, 200, 20]);
+    }
+
+    public function testOrdinaryInlineBaselineAndLineHeightRemainUnchanged(): void
+    {
+        $result = $this->layout('<div data-test="parent"><span>BEFORE</span><span>MIDDLE</span><span>AFTER</span><br><span>NEXT</span></div>', '', 1);
+        foreach (array_slice($result["text"][1], 0, 3) as $text) {
+            $this->assertEqualsWithDelta(15.84, $text[3], 0.01);
+        }
+        $this->assertEqualsWithDelta(19.8, $result["boxes"]["parent"][0]["lines"][0][1], 0.01);
+        $this->assertEqualsWithDelta(19.8, $result["boxes"]["parent"][0]["lines"][1][0], 0.01);
+    }
+
+    public function testInlineFlexNativeAdmissionHandlesSolitaryWrappedAndCellLines(): void
+    {
+        $flex = '<span data-test="flex" style="display:inline-flex;width:60pt;height:40pt;align-items:flex-start">'
+            . '<span style="flex:none;width:60pt;height:20pt">FLEX</span></span>';
+        foreach (["solitary" => '<div data-test="parent">' . $flex . '<br>NEXT</div>',
+            "wrapped" => '<div data-test="parent" style="width:80pt"><span style="display:inline-block;width:60pt;height:20pt">BEFORE</span>' . $flex . '<br>NEXT</div>',
+            "cell" => '<table style="border-spacing:0"><tr><td data-test="parent" style="padding:0">BEFORE' . $flex . 'AFTER<br>NEXT</td></tr></table>'] as $case => $html) {
+            $result = $this->layout($html, '', 1);
+            $parent = $result["boxes"]["parent"][0];
+            $box = $result["boxes"]["flex"][0]["box"];
+            $lines = $parent["lines"];
+            $last = $lines[count($lines) - 1];
+            $this->assertGreaterThanOrEqual($box[1] + $box[3] - 0.01, $last[0], $case);
+            $text = array_column($result["text"][1], 3, 0);
+            if ($case === "cell") {
+                $this->assertEqualsWithDelta($text["FLEX"], $text["BEFORE"], 0.01);
+                $this->assertEqualsWithDelta($text["FLEX"], $text["AFTER"], 0.01);
+            }
+            $this->assertCount(1, $result["boxes"]["flex"]);
+        }
+    }
+
+    public function testInlineFlexNonbaselineTopAndNativeMiddleKeepLineBounds(): void
+    {
+        foreach (["top", "middle"] as $align) {
+            $result = $this->layout('<div data-test="parent"><span>BEFORE</span>'
+                . '<span data-test="flex" style="display:inline-flex;width:60pt;height:20pt;vertical-align:' . $align . '">'
+                . '<span style="flex:none;width:60pt;height:20pt">FLEX</span></span><span>AFTER</span><br>NEXT</div>', '', 1);
+            $box = $result["boxes"]["flex"][0]["box"];
+            $line = $result["boxes"]["parent"][0]["lines"][0];
+            $this->assertEqualsWithDelta($align === "top" ? 0 : -2, $box[1], 0.01);
+            $this->assertGreaterThanOrEqual($box[1] + $box[3] - 0.01, $line[0] + $line[1]);
+            $this->assertEqualsWithDelta($line[0] + $line[1], $result["boxes"]["parent"][0]["lines"][1][0], 0.01);
+        }
+    }
+
+    public function testFirstTextLineAndImageOnlyLineDonateDifferentBaselines(): void
+    {
+        $result = $this->layout('<div style="display:flex;width:300pt;align-items:baseline">'
+            . '<div data-test="A" style="flex:none;width:100pt;padding-top:3pt;border-top:2pt solid;margin-top:5pt">FIRST<br>LAST</div>'
+            . '<div style="flex:none;width:100pt">PEER</div>'
+            . '<div data-test="image-line" style="flex:none;width:100pt"><img data-test="image" style="width:20pt;height:30pt" src="' . $this->image() . '"></div></div>', '', 1);
+        $text = array_column($result["text"][1], 3, 0);
+        $this->assertEqualsWithDelta($text["FIRST"], $text["PEER"], 0.01);
+        $this->assertEqualsWithDelta(19.8, $text["LAST"] - $text["FIRST"], 0.01);
+        $image = $result["boxes"]["image"][0]["box"];
+        $this->assertEqualsWithDelta($image[1] + $image[3], $text["PEER"], 0.01);
     }
 
     public static function lineGapGeometryProvider(): array
@@ -1174,7 +1718,7 @@ class FlexTest extends TestCase
 
     public function testFlexedContinuationKeepsResolvedOriginalSlot(): void
     {
-        $html = '<article><div style="display:flex;width:200pt">';
+        $html = '<article><div style="display:flex;width:200pt;align-items:flex-start">';
         foreach (["A" => 3, "B" => 8] as $prefix => $count) {
             $html .= '<div data-test="' . $prefix . '" style="flex:1 1 50pt;min-width:0">';
             for ($i = 1; $i <= $count; $i++) {
@@ -1188,6 +1732,23 @@ class FlexTest extends TestCase
         $this->assertSame(["B6", "B7", "B8", "AFTER"], array_column($result["text"][2], 0));
         $this->assertBox($result, "A", [0, 0, 100, 60]);
         $this->assertBox($result, "B", [100, 0, 100, 60], 1);
+    }
+
+    public function testDefaultStretchUsesTallestContentWithoutReplayingShortPeer(): void
+    {
+        $html = '<div style="display:flex;width:200pt">';
+        foreach (["A" => 3, "B" => 8] as $prefix => $count) {
+            $html .= '<div data-test="' . $prefix . '" style="flex:1 1 50pt;min-width:0">';
+            for ($i = 1; $i <= $count; $i++) {
+                $html .= '<div style="height:20pt">' . $prefix . $i . '</div>';
+            }
+            $html .= '</div>';
+        }
+        $result = $this->layout($html . '</div><div data-test="after">AFTER</div>', '', 1);
+        $this->assertBox($result, "A", [0, 0, 100, 160]);
+        $this->assertBox($result, "B", [100, 0, 100, 160]);
+        $this->assertBox($result, "after", [0, 160]);
+        $this->assertSame("A1A2A3B1B2B3B4B5B6B7B8AFTER", implode("", array_column($result["text"][1], 0)));
     }
 
     public function testUnrepresentableLineGeometryFailsWithoutPaginationLoop(): void

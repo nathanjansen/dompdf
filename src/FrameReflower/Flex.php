@@ -19,7 +19,137 @@ class Flex extends Block
 
     protected function _calculate_content_height(): float
     {
-        return $this->content_height;
+        $layout = $this->_frame->get_flex_layout();
+        return $this->content_height + array_sum($layout["content_spacing"] ?? []);
+    }
+
+    /** Leading and additional between-box space, excluding the authored gap. */
+    private function alignment_spacing(string $alignment, float $free, int $count, bool $reverse = false, bool $horizontal = true, ?string $selfDirection = null): array
+    {
+        if (in_array($alignment, ["baseline", "first baseline", "last baseline"], true)) {
+            $alignment = "safe " . ($selfDirection !== null ? "self-" : "")
+                . ($alignment === "last baseline" ? "end" : "start");
+        }
+        $safe = strpos($alignment, "safe ") === 0;
+        $alignment = preg_replace('/^(?:safe|unsafe) /', '', $alignment);
+        if ($safe && $free < 0) {
+            $alignment = "flex-start";
+        }
+        if (($alignment === "space-around" || $alignment === "space-evenly") && $free < 0) {
+            $alignment = "flex-start";
+        }
+        if (in_array($alignment, ["start", "end", "self-start", "self-end", "left", "right"], true)) {
+            $direction = strpos($alignment, "self-") === 0 ? $selfDirection : $this->_frame->get_style()->direction;
+            $startAtEnd = $horizontal && $direction === "rtl";
+            $end = in_array($alignment, ["end", "self-end"], true);
+            if ($horizontal && ($alignment === "left" || $alignment === "right")) {
+                $startAtEnd = false;
+                $end = $alignment === "right";
+            }
+            $alignment = ($reverse !== ($startAtEnd !== $end)) ? "flex-end" : "flex-start";
+        }
+        if ($alignment === "flex-end") {
+            return [$free, 0.0];
+        }
+        if ($alignment === "center") {
+            return [$free / 2, 0.0];
+        }
+        if ($alignment === "space-between" && $count > 1 && $free > 0) {
+            return [0.0, $free / ($count - 1)];
+        }
+        if ($alignment === "space-around" && $count > 0 && $free > 0) {
+            return [$free / (2 * $count), $free / $count];
+        }
+        if ($alignment === "space-evenly" && $count > 0 && $free > 0) {
+            return [$free / ($count + 1), $free / ($count + 1)];
+        }
+        return [0.0, 0.0];
+    }
+
+    /** Resolve shared content/self baselines from neutral, private native metrics. */
+    private function content_baselines(array $members, array &$slots, array $sizing, array $items, float $lineSize, bool $crossReverse): array
+    {
+        $records = [];
+        $first = $last = 0.0;
+        foreach ($members as $index) {
+            $slot = $slots[$index];
+            $metric = $sizing[$index]["baseline_metrics"];
+            $style = $items[$index]->get_style();
+            $align = $style->align_self === "auto" ? $this->_frame->get_style()->align_items : $style->align_self;
+            $content = $style->align_content;
+            $selfFirst = in_array($align, ["baseline", "first baseline"], true);
+            $selfLast = $align === "last baseline";
+            $topAuto = isset($slot["margins"]["margin_top"]);
+            $bottomAuto = isset($slot["margins"]["margin_bottom"]);
+            $selfFirst = $selfFirst && !$topAuto && !$bottomAuto;
+            $selfLast = $selfLast && !$topAuto && !$bottomAuto;
+            $eligible = $items[$index] instanceof BlockFrameDecorator
+                && !($items[$index] instanceof \Dompdf\FrameDecorator\Flex
+                    && strpos($style->flex_direction, "column") === 0);
+            $contentFirst = $eligible && in_array($content, ["baseline", "first baseline"], true);
+            $contentLast = $eligible && $content === "last baseline";
+            if ($eligible && ($selfFirst || $selfLast) && ($content === "normal" || $contentFirst || $contentLast)) {
+                $contentFirst = $selfFirst;
+                $contentLast = $selfLast;
+            }
+            $height = $slot["height"] ?? $metric["height"];
+            $outer = $height + $metric["edges"];
+            $before = $contentLast ? max(0.0, $height - $metric["content_height"]) : 0.0;
+            $stretch = in_array($align, ["normal", "stretch"], true);
+            $fallback = $stretch && ($contentFirst || $contentLast) ? ($contentLast ? "self-end" : "self-start") : $align;
+            [$position] = $this->alignment_spacing($fallback, 1.0, 1, $crossReverse, false, $style->direction);
+            $position = $crossReverse ? 1.0 - $position : $position;
+            $fits = $outer <= $lineSize;
+            $firstContent = $contentFirst && !$selfFirst && !$selfLast && (
+                (!$topAuto && !$bottomAuto && $position === 0.0)
+                || (!$topAuto && $bottomAuto && $fits));
+            $lastContent = $contentLast && !$selfFirst && !$selfLast && (
+                (!$topAuto && !$bottomAuto && $position === 1.0 && ($fits || strpos($align, "safe ") !== 0))
+                || ($topAuto && !$bottomAuto && $fits));
+            if ($selfFirst || $firstContent) {
+                $first = max($first, $metric["baseline"] + $before);
+            }
+            if ($selfLast || $lastContent) {
+                $last = max($last, $outer - $metric["last_baseline"] - $before);
+            }
+            $records[$index] = compact("height", "outer", "before", "selfFirst", "selfLast", "firstContent", "lastContent", "contentFirst", "contentLast");
+        }
+        $ascent = $descent = $lastAscent = $lastDescent = 0.0;
+        foreach ($records as $index => $record) {
+            $slot = &$slots[$index];
+            $metric = $sizing[$index]["baseline_metrics"];
+            $before = $record["before"];
+            $after = 0.0;
+            if ($record["firstContent"]) {
+                $before += max(0.0, $first - $metric["baseline"] - $before);
+            } elseif ($record["lastContent"]) {
+                $after = max(0.0, $last - ($record["outer"] - $metric["last_baseline"] - $before));
+                $before = max(0.0, $before - $after);
+            }
+            $height = $record["height"];
+            if ($slot["height"] === null) {
+                $height = max($height, min($metric["content_height"] + $before + $after, $sizing[$index]["cross_max"]));
+            }
+            if ($record["contentFirst"] || $record["contentLast"]) {
+                $slot["content_spacing"] = [$before, $after];
+            }
+            $slot["cross_size"] = $height + $metric["edges"];
+            $slot["baseline"] = $metric["baseline"] + $before;
+            $slot["last_baseline"] = $metric["last_baseline"] + $before;
+            unset($slot["baseline_group"]);
+            if ($record["selfFirst"] || $record["firstContent"]) {
+                $slot["baseline_group"] = "first";
+                $ascent = max($ascent, $slot["baseline"]);
+                $descent = max($descent, $slot["cross_size"] - $slot["baseline"]);
+            }
+            if ($record["selfLast"] || $record["lastContent"]) {
+                $slot["baseline_group"] = "last";
+                $lastAscent = max($lastAscent, $slot["last_baseline"]);
+                $lastDescent = max($lastDescent, $slot["cross_size"] - $slot["last_baseline"]);
+            }
+            unset($slot);
+        }
+        return [$ascent, $descent, $lastAscent, $lastDescent];
     }
 
     private function item_sizes(AbstractFrameDecorator $item, float $width, ?float $height): array
@@ -101,7 +231,8 @@ class Flex extends Block
         $max = max($min, $max);
         return ["base" => $base, "hypothetical" => max($min, min($base, $max)),
             "min" => $min, "max" => $max, "outer" => $outer,
-            "grow" => $style->flex_grow, "shrink" => $style->flex_shrink, "height" => $itemHeight];
+            "grow" => $style->flex_grow, "shrink" => $style->flex_shrink, "height" => $itemHeight,
+            "cross_min" => $minHeight, "cross_max" => max($minHeight, $maxHeight)];
     }
 
     private function column_item_sizes(AbstractFrameDecorator $item, float $width, ?float $height): array
@@ -113,6 +244,19 @@ class Flex extends Block
         $crossOuter = $crossEdges + (float) $style->length_in_pt([$style->margin_left, $style->margin_right], $width);
         $cross = $style->width === "auto" ? $width - $crossOuter
             : (float) $style->length_in_pt($style->width, $width) - ($borderBox ? $crossEdges : 0.0);
+        if ($style->width === "auto") {
+            if ($item instanceof Image) {
+                [$naturalWidth] = $item->get_intrinsic_dimensions();
+                $cross = min($cross, $item->resample($naturalWidth));
+            } else {
+                $probe = (new FlexLayoutContext($item, true, null))->get_item();
+                $probe->get_style()->set_used("width", "auto");
+                $probe->get_style()->set_used("min_width", 0.0);
+                $probe->get_style()->set_used("max_width", "none");
+                [$minimum, $maximum] = $probe->get_reflower()->get_min_max_content_width();
+                $cross = max($minimum, min($cross, $maximum));
+            }
+        }
         $crossMin = $style->min_width === "auto" ? 0.0
             : max(0.0, (float) $style->length_in_pt($style->min_width, $width) - ($borderBox ? $crossEdges : 0.0));
         $crossMax = $style->max_width === "none" ? INF
@@ -170,7 +314,8 @@ class Flex extends Block
         $max = max($min, $max);
         return ["base" => $base, "hypothetical" => max($min, min($base, $max)), "min" => $min, "max" => $max,
             "outer" => $outer, "grow" => $style->flex_grow, "shrink" => $style->flex_shrink,
-            "width" => $cross, "cross_outer" => $crossOuter, "definite_height" => $height !== null || !$intrinsic];
+            "width" => $cross, "cross_outer" => $crossOuter, "definite_height" => $height !== null || !$intrinsic,
+            "cross_min" => $crossMin, "cross_max" => max($crossMin, $crossMax)];
     }
 
     public function reflow(?BlockFrameDecorator $block = null)
@@ -209,7 +354,7 @@ class Flex extends Block
             $height = $minimumHeight;
         }
         $logicalHeight = $height === "auto" ? null : $height;
-        if (($column || $wrap) && $frame->get_continuation_extent() !== null) {
+        if ($frame->get_continuation_extent() !== null) {
             $height = $minimumHeight = $frame->get_continuation_extent();
         }
         $style->set_used("height", $minimumHeight);
@@ -218,6 +363,7 @@ class Flex extends Block
         }
         $style->set_used("height", $height);
         $box = $frame->get_content_box();
+        $box["y"] += $layout["content_spacing"][0] ?? 0.0;
         $available = max(0.0, $page->get_bottom_page_edge() - $box["y"]);
         $available = max(0.0, $available - (float) $style->computed_bottom_spacing($cb["w"]));
         $childHeight = $height === "auto" ? $available : $height;
@@ -255,7 +401,13 @@ class Flex extends Block
                 $sizing[] = $sizes;
                 $slot = $column ? ["width" => $sizes["width"], "height" => $sizes["base"],
                     "cross_outer" => $sizes["cross_outer"], "definite_height" => $sizes["definite_height"]]
-                    : ["width" => $sizes["base"], "height" => $sizes["height"]];
+                    : ["width" => $sizes["base"], "height" => $sizes["height"], "definite_height" => $sizes["height"] !== null];
+                $slot["margins"] = [];
+                foreach (["top", "right", "bottom", "left"] as $edge) {
+                    if ($item->get_style()->get_computed("margin_" . $edge) === "auto") {
+                        $slot["margins"]["margin_" . $edge] = 0.0;
+                    }
+                }
                 if ($column && $height === "auto") {
                     // ponytail: inflexible/content-sized auto columns; flexible
                     // intrinsic main-size calculation remains the §9.9 goal10 seam.
@@ -297,6 +449,8 @@ class Flex extends Block
                 $sizes = array_combine($members, FlexLine::resolve($lineSizing, $extent, $mainGap));
                 $offset = 0.0;
                 $crossSize = 0.0;
+                $ascent = $descent = 0.0;
+                $lastAscent = $lastDescent = 0.0;
                 foreach ($members as $index) {
                     $slot = &$slots[$index];
                     $slot["line"] = $lineId;
@@ -306,29 +460,156 @@ class Flex extends Block
                     if ($column) {
                         $slot["reference_height"] = $slot["definite_height"] ? $sizes[$index] : null;
                         $crossSize = max($crossSize, $slot["width"] + $slot["cross_outer"]);
-                    } elseif ($wrap) {
+                    } else {
                         // Native isolated layout at the final main size determines line height.
                         $frame->set_item_layout($items[$index], ["x" => $box["x"], "y" => $box["y"],
                             "width" => $slot["width"], "height" => $slot["height"], "definite_width" => true,
-                            "definite_height" => $slot["height"] !== null]);
+                            "definite_height" => $slot["height"] !== null, "content_spacing" => [0.0, 0.0]]);
                         $probe = (new FlexLayoutContext($items[$index], true, null))->layout();
                         $slot["cross_size"] = $probe["consumed_block_size"];
                         $crossSize = max($crossSize, $probe["consumed_block_size"]);
+                        $fragment = $probe["fragment"];
+                        $slot["baseline"] = $fragment->get_baseline();
+                        $slot["last_baseline"] = $fragment->get_baseline(true);
+                        if ($slot["baseline"] === null) {
+                            $border = $fragment->get_border_box();
+                            $slot["baseline"] = $border["y"] + $border["h"] - $fragment->get_position("y");
+                        }
+                        $slot["last_baseline"] = $slot["last_baseline"] ?? $slot["baseline"];
+                        $nativeHeight = (float) $fragment->get_style()->height;
+                        $sizing[$index]["baseline_metrics"] = ["baseline" => $slot["baseline"],
+                            "last_baseline" => $slot["last_baseline"], "height" => $nativeHeight,
+                            "edges" => $slot["cross_size"] - $nativeHeight,
+                            "content_height" => $fragment instanceof BlockFrameDecorator
+                                ? $fragment->get_reflower()->_calculate_content_height() : $nativeHeight];
                     }
                     $offset += $sizes[$index] + $slot["outer"] + $mainGap;
                     unset($slot);
                 }
+                if (!$column) {
+                    [$ascent, $descent, $lastAscent, $lastDescent] = $this->content_baselines(
+                        $members, $slots, $sizing, $items, $logicalHeight ?? $crossSize, $crossReverse);
+                    $crossSize = max(0.0, max(array_column(array_intersect_key($slots, array_flip($members)), "cross_size")));
+                }
+                $crossSize = max($crossSize, $ascent + $descent, $lastAscent + $lastDescent);
                 if (!$wrap) {
                     $crossSize = $column ? $width : ($logicalHeight ?? $crossSize);
                 }
-                $lines[$lineId] = ["offset" => $crossExtent, "cross_size" => $crossSize, "extent" => $extent];
+                $lines[$lineId] = ["offset" => $crossExtent, "cross_size" => $crossSize, "extent" => $extent,
+                    "baseline" => $ascent, "last_ascent" => $lastAscent, "last_descent" => $lastDescent];
                 $crossExtent += $crossSize + $crossGap;
             }
             $crossExtent = max(0.0, $crossExtent - $crossGap);
-            if ($crossReverse) {
-                $crossExtent = $column ? $width : ($logicalHeight ?? $crossExtent);
-                foreach ($lines as &$line) {
-                    $line["offset"] = $crossExtent - $line["offset"] - $line["cross_size"];
+            $containerCross = $column ? $width : ($logicalHeight ?? $crossExtent);
+            $freeCross = $containerCross - $crossExtent;
+            $lineStretch = $wrap && in_array($style->align_content, ["normal", "stretch"], true) && $freeCross > 0 ? $freeCross / count($lines) : 0.0;
+            $contentAlignment = isset($layout["content_spacing"]) && in_array($style->align_content, ["baseline", "first baseline", "last baseline"], true)
+                ? "start" : $style->align_content;
+            [$crossOffset, $lineSpace] = $wrap ? $this->alignment_spacing($contentAlignment, $freeCross, count($lines), $crossReverse, $column) : [0.0, 0.0];
+            foreach ($membership as $lineId => $members) {
+                $line = &$lines[$lineId];
+                $line["cross_size"] += $lineStretch;
+                $line["offset"] = $crossReverse ? $containerCross - $crossOffset - $line["cross_size"] : $crossOffset;
+                $crossOffset += $line["cross_size"] + $crossGap + $lineSpace;
+                $mainEdges = $column ? ["margin_top", "margin_bottom"] : ["margin_left", "margin_right"];
+                $crossEdges = $column ? ["margin_left", "margin_right"] : ["margin_top", "margin_bottom"];
+                $free = $extent - max(0, count($members) - 1) * $mainGap;
+                $autoCount = 0;
+                foreach ($members as $index) {
+                    $free -= $slots[$index][$column ? "height" : "width"] + $slots[$index]["outer"];
+                    foreach ($mainEdges as $edge) {
+                        $autoCount += isset($slots[$index]["margins"][$edge]) ? 1 : 0;
+                    }
+                }
+                $autoSpace = $autoCount > 0 ? max(0.0, $free) / $autoCount : 0.0;
+                [$offset, $between] = $this->alignment_spacing($style->justify_content, $free - $autoSpace * $autoCount, count($members), $reverse, !$column);
+                foreach ($members as $index) {
+                    $slot = &$slots[$index];
+                    $itemStyle = $items[$index]->get_style();
+                    foreach ($mainEdges as $edge) {
+                        if (isset($slot["margins"][$edge])) {
+                            $slot["margins"][$edge] = $autoSpace;
+                            $slot["outer"] += $autoSpace;
+                        }
+                    }
+                    $main = $slot[$column ? "height" : "width"] + $slot["outer"];
+                    $slot["offset"] = $reverse ? $extent - $offset - $main : $offset;
+                    $offset += $main + $mainGap + $between;
+                    $crossAuto = array_intersect($crossEdges, array_keys($slot["margins"]));
+                    $align = $itemStyle->align_self === "auto" ? $style->align_items : $itemStyle->align_self;
+                    $align = $align === "normal" ? "stretch" : $align;
+                    $outer = $column ? $slot["width"] + $slot["cross_outer"] : $slot["cross_size"];
+                    if ($align === "stretch" && $itemStyle->get_computed($column ? "width" : "height") === "auto" && !$crossAuto) {
+                        $crossOuter = $column ? $slot["cross_outer"] : (float) $itemStyle->length_in_pt([
+                            $itemStyle->margin_top, $itemStyle->margin_bottom, $itemStyle->padding_top, $itemStyle->padding_bottom,
+                            $itemStyle->border_top_width, $itemStyle->border_bottom_width], $width);
+                        $size = max($sizing[$index]["cross_min"], min($line["cross_size"] - $crossOuter, $sizing[$index]["cross_max"]));
+                        $slot[$column ? "width" : "height"] = $size;
+                        $outer = $size + $crossOuter;
+                        if (!$column) {
+                            $slot["definite_height"] = true;
+                            $slot["reference_height"] = $size;
+                            if (isset($slot["content_spacing"])) {
+                                // Percentage descendants can change the donor after stretch.
+                                $frame->set_item_layout($items[$index], ["x" => $box["x"], "y" => $box["y"],
+                                    "width" => $slot["width"], "height" => $size, "definite_width" => true,
+                                    "definite_height" => true, "reference_height" => $size, "content_spacing" => [0.0, 0.0]]);
+                                $probe = (new FlexLayoutContext($items[$index], true, null))->layout();
+                                $fragment = $probe["fragment"];
+                                $metric = &$sizing[$index]["baseline_metrics"];
+                                $metric["height"] = $size;
+                                $metric["content_height"] = $fragment->get_reflower()->_calculate_content_height();
+                                $metric["baseline"] = $fragment->get_baseline() ?? $metric["baseline"];
+                                $metric["last_baseline"] = $fragment->get_baseline(true) ?? $metric["last_baseline"];
+                                unset($metric);
+                            }
+                        }
+                    }
+                    if (!$column) {
+                        $slot["cross_size"] = $outer;
+                    }
+                    unset($slot);
+                }
+                if (!$column && array_filter(array_intersect_key($slots, array_flip($members)), function ($slot) {
+                    return isset($slot["content_spacing"]);
+                })) {
+                    [$line["baseline"], , $line["last_ascent"], $line["last_descent"]] = $this->content_baselines(
+                        $members, $slots, $sizing, $items, $line["cross_size"], $crossReverse);
+                }
+                // Final content-group growth precedes every cross position and auto edge.
+                foreach ($members as $index) {
+                    $slot = &$slots[$index];
+                    $itemStyle = $items[$index]->get_style();
+                    $crossAuto = array_intersect($crossEdges, array_keys($slot["margins"]));
+                    $align = $itemStyle->align_self === "auto" ? $style->align_items : $itemStyle->align_self;
+                    $align = $align === "normal" ? "stretch" : $align;
+                    $outer = $column ? $slot["width"] + $slot["cross_outer"] : $slot["cross_size"];
+                    $crossFree = $line["cross_size"] - $outer;
+                    if ($crossAuto) {
+                        if ($crossFree > 0) {
+                            foreach ($crossAuto as $edge) {
+                                $slot["margins"][$edge] = $crossFree / count($crossAuto);
+                            }
+                        } else {
+                            $end = $column && $style->direction === "rtl" ? $crossEdges[0] : $crossEdges[1];
+                            $slot["margins"][$end] = (float) $itemStyle->length_in_pt($itemStyle->$end, $width) + $crossFree;
+                        }
+                        $outer = $line["cross_size"];
+                        $crossFree = 0.0;
+                    }
+                    $fallback = $align === "stretch" && isset($slot["content_spacing"])
+                        ? ($itemStyle->align_content === "last baseline" ? "self-end" : "self-start") : $align;
+                    [$cross] = $this->alignment_spacing($fallback, $crossFree, 1, $crossReverse, $column, $itemStyle->direction);
+                    $slot["cross_offset"] = $crossReverse ? $crossFree - $cross : $cross;
+                    if (!$column && ($align === "baseline" || $align === "first baseline") && !$crossAuto) {
+                        $slot["cross_offset"] = $line["baseline"] - $slot["baseline"];
+                    } elseif (!$column && $align === "last baseline" && !$crossAuto) {
+                        $slot["cross_offset"] = max($line["last_ascent"], $line["cross_size"] - $line["last_descent"]) - $slot["last_baseline"];
+                    }
+                    if (!$column) {
+                        $slot["cross_size"] = $outer;
+                    }
+                    unset($slot);
                 }
                 unset($line);
             }
@@ -360,12 +641,21 @@ class Flex extends Block
             foreach ($visits as $visit => $index) {
                 $item = $items[$index];
                 $slot = $slots[$index];
-                $x = $column ? $line["offset"] + ($crossReverse ? $line["cross_size"] - $slot["width"] - $slot["cross_outer"] : 0.0) : $slot["offset"];
-                $y = $column ? $slot["offset"] : $line["offset"] + ($crossReverse ? $line["cross_size"] - $slot["cross_size"] : 0.0);
+                $x = $column ? $line["offset"] + $slot["cross_offset"] : $slot["offset"];
+                $y = $column ? $slot["offset"] : $line["offset"] + $slot["cross_offset"];
                 $assignment = ["x" => $box["x"] + $x, "y" => $box["y"] + $y,
                     "width" => $slot["width"], "height" => $slot["height"], "definite_width" => true,
-                    "definite_height" => $column ? $slot["definite_height"] : $slot["height"] !== null];
+                    "definite_height" => $slot["definite_height"], "line" => $lineId];
                 $assignment["reference_height"] = $slot["reference_height"] ?? $slot["height"];
+                if (isset($slot["content_spacing"])) {
+                    $assignment["content_spacing"] = $slot["content_spacing"];
+                }
+                if (isset($slot["baseline_group"])) {
+                    $assignment["baseline_group"] = $slot["baseline_group"];
+                }
+                foreach ($slot["margins"] as $edge => $value) {
+                    $item->get_style()->set_used($edge, $value);
+                }
                 $frame->set_item_layout($item, $assignment);
                 $item->set_positioner(new FlexPositioner());
                 $forced = $column && $canForce && in_array($item->get_style()->page_break_before, ["always", "left", "right"], true);
@@ -376,11 +666,11 @@ class Flex extends Block
                     $result = (new FlexLayoutContext($item, false, $available))->layout();
                 }
                 if ($result["fragment"]) {
-                    if (($column || $wrap) && $result["continuation"] && $item->get_reflower() instanceof Block) {
-                        $prefix = max(0.0, $item->get_reflower()->_calculate_content_height());
+                    if ($result["continuation"] && $item->get_reflower() instanceof Block) {
+                        $prefix = max(0.0, $item->get_reflower()->_calculate_content_height() - ($slot["content_spacing"][1] ?? 0.0));
                         $item->get_style()->set_used("height", $prefix);
                         $result["consumed_block_size"] = $item->get_margin_height();
-                        if (!$column && $wrap) {
+                        if (!$column) {
                             $slot["cross_size"] = max(0.0, $slot["cross_size"] - $result["consumed_block_size"]);
                             $remaining = $result["continuation"];
                             if ($remaining instanceof \Dompdf\FrameDecorator\Flex && $remaining->get_continuation_extent() !== null) {
@@ -401,6 +691,17 @@ class Flex extends Block
                     $this->content_height = max($this->content_height, $y + $result["consumed_block_size"]);
                 }
                 if ($result["continuation"]) {
+                    if ($result["fragment"]) {
+                        if (isset($slot["content_spacing"])) {
+                            $slot["content_spacing"][0] = max(0.0, $slot["content_spacing"][0] - $result["consumed_block_size"]);
+                        }
+                        if (isset($slot["margins"]["margin_top"])) {
+                            $slot["margins"]["margin_top"] = 0.0;
+                        }
+                        if (!$column) {
+                            $slot["cross_offset"] = 0.0;
+                        }
+                    }
                     if ($column) {
                         // At an item boundary discard its separating gap, not leading free space.
                         $cut = $result["fragment"] ? $y + $result["consumed_block_size"]
@@ -427,8 +728,8 @@ class Flex extends Block
                     $nextExtent = max($nextExtent, $line["extent"]);
                 } else {
                     $cut = $lineBottom;
-                    $remainingCross = $wrap ? max(0.0, max(array_column(array_column($lineContinuations, 1), "cross_size"))) : 0.0;
-                    $cut = $wrap ? $line["offset"] + $line["cross_size"] - $remainingCross : $cut;
+                    $remainingCross = max(0.0, max(array_column(array_column($lineContinuations, 1), "cross_size")));
+                    $cut = $line["offset"] + $line["cross_size"] - $remainingCross;
                     $line["cross_size"] = $remainingCross;
                     $line["offset"] = 0.0;
                     $nextExtent = $line["cross_size"];
@@ -453,8 +754,8 @@ class Flex extends Block
         [$usedHeight, $topMargin, $bottomMargin, $top, $bottom] = $this->_calculate_restricted_height();
         if ($column) {
             $usedHeight = $continuations ? $this->content_height : $extent;
-        } elseif ($wrap && $continuations) {
-            $usedHeight = $this->content_height;
+        } elseif ($continuations) {
+            $usedHeight = $this->content_height + ($layout["content_spacing"][0] ?? 0.0);
         }
         $style->set_used("height", $usedHeight);
         $style->set_used("margin_top", $topMargin);
@@ -493,9 +794,7 @@ class Flex extends Block
                 $nextStyle->$topProp = 0.0;
             }
             $nextStyle->page_break_before = "auto";
-            if ($column || $wrap) {
-                $next->set_continuation_extent($nextExtent);
-            }
+            $next->set_continuation_extent($nextExtent);
             $next->set_continuation_lines($nextLines);
             foreach ($continuations as [$item, $slot]) {
                 $next->append_child($item);
