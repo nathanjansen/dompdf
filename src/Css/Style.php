@@ -96,6 +96,18 @@ use Dompdf\Helpers;
  * @property string               $display
  * @property string               $elevation
  * @property string               $empty_cells
+ * @property string               $flex_direction
+ * @property string               $flex_wrap
+ * @property string               $flex_flow
+ * @property int                  $order
+ * @property float                $flex_grow
+ * @property float                $flex_shrink
+ * @property float|string         $flex_basis
+ * @property string               $flex
+ * @property string               $justify_content
+ * @property string               $align_items
+ * @property string               $align_self
+ * @property string               $align_content
  * @property string               $float
  * @property string               $font_family
  * @property float                $font_size                   Length in pt
@@ -146,6 +158,9 @@ use Dompdf\Helpers;
  * @property array|string         $quotes                      List of quote pairs, or `none`
  * @property string               $richness
  * @property float|string         $right                       Length in pt, a percentage value, or `auto`
+ * @property float|string         $row_gap                    Length in pt, a percentage value, or `normal`
+ * @property float|string         $column_gap                 Length in pt, a percentage value, or `normal`
+ * @property string               $gap
  * @property float[]|string       $size                        Pair of `[width, height]` or `auto`
  * @property string               $speak_header
  * @property string               $speak_numeral
@@ -443,6 +458,19 @@ class Style
             "font_weight",
             "line_height"
         ],
+        "flex" => [
+            "flex_grow",
+            "flex_shrink",
+            "flex_basis"
+        ],
+        "flex_flow" => [
+            "flex_direction",
+            "flex_wrap"
+        ],
+        "gap" => [
+            "row_gap",
+            "column_gap"
+        ],
         "inset" => [
             "top",
             "right",
@@ -479,6 +507,9 @@ class Style
      * @var array<string, string>
      */
     protected static $_props_alias = [
+        "grid_gap"                           => "gap",
+        "grid_row_gap"                       => "row_gap",
+        "grid_column_gap"                    => "column_gap",
         "word_wrap"                           => "overflow_wrap",
         "_dompdf_background_image_resolution" => "background_image_resolution",
         "_dompdf_image_resolution"            => "image_resolution",
@@ -599,7 +630,10 @@ class Style
             "min-width",
             "min-height",
             "max-width",
-            "max-height"
+            "max-height",
+            "flex_basis",
+            "row_gap",
+            "column_gap"
         ],
         "float" => [
             "display"
@@ -833,6 +867,18 @@ class Style
             $d["font_variant"] = "normal";
             $d["font_weight"] = 400;
             $d["font"] = "";
+            $d["flex_direction"] = "row";
+            $d["flex_wrap"] = "nowrap";
+            $d["flex_flow"] = "";
+            $d["order"] = 0;
+            $d["flex_grow"] = 0.0;
+            $d["flex_shrink"] = 1.0;
+            $d["flex_basis"] = "auto";
+            $d["flex"] = "";
+            $d["justify_content"] = "flex-start";
+            $d["align_items"] = "stretch";
+            $d["align_self"] = "auto";
+            $d["align_content"] = "stretch";
             $d["height"] = "auto";
             $d["image_resolution"] = "normal";
             $d["inset"] = "";
@@ -878,6 +924,9 @@ class Style
             $d["quotes"] = "auto";
             $d["richness"] = "50";
             $d["right"] = "auto";
+            $d["row_gap"] = "normal";
+            $d["column_gap"] = "normal";
+            $d["gap"] = "";
             $d["size"] = "auto"; // @page
             $d["speak_header"] = "once";
             $d["speak_numeral"] = "continuous";
@@ -1695,7 +1744,8 @@ class Style
                 return;
             }
 
-            if ($important) {
+            $has_var = \is_string($val) && \preg_match("/" . self::CSS_VAR . "/", $val);
+            if ($important && $has_var) {
                 $this->_important_props[$prop] = true;
             }
 
@@ -1711,7 +1761,7 @@ class Style
 
             // Always set the specified value for properties that use CSS variables
             // so that an invalid initial value does not prevent re-computation later.
-            if (\is_string($val) && \preg_match("/" . self::CSS_VAR . "/", $val)) {
+            if ($has_var) {
                 $this->_props[$prop] = $val;
             }
 
@@ -1720,6 +1770,10 @@ class Style
             // Skip invalid declarations
             if ($computed === null) {
                 return;
+            }
+
+            if ($important) {
+                $this->_important_props[$prop] = true;
             }
 
             $this->_props[$prop] = $val;
@@ -3421,6 +3475,281 @@ class Style
         }
 
         return $break;
+    }
+
+    private function parse_flexbox_value(string $val): array
+    {
+        $values = $this->parse_property_value($val);
+        return $values !== [] && !$this->has_invalid_flex_dimension($val)
+            && preg_replace("/\\s+/", "", $val) === preg_replace("/\\s+/", "", implode("", $values))
+            ? $values
+            : [];
+    }
+
+    private function has_invalid_flex_dimension(string $val): bool
+    {
+        $number = self::CSS_NUMBER;
+        preg_match_all("/($number)(%|[a-zA-Z][a-zA-Z0-9-]*)?/", $val, $matches);
+        foreach ($matches[2] as $unit) {
+            if ($unit !== "" && !in_array(strtolower($unit), ["%", "px", "pt", "pc", "rem", "em", "ex", "in", "cm", "mm"], true)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private function compute_flex_keyword(string $val, array $keywords): ?string
+    {
+        $val = strtolower($val);
+        return in_array($val, $keywords, true) ? $val : null;
+    }
+
+    private function compute_flex_factor(string $val): ?float
+    {
+        $number = $this->compute_number($val);
+        return $number !== null && \is_finite($number) && $number >= 0 ? $number : null;
+    }
+
+    private function compute_flex_alignment(string $val, string $property): ?string
+    {
+        $values = array_map("strtolower", $this->parse_flexbox_value($val));
+        if ($values === []) {
+            return null;
+        }
+
+        $self = $property === "align_items" || $property === "align_self";
+        $content = $property === "justify_content" || $property === "align_content";
+        $baseline = $property !== "justify_content";
+        $positions = $self
+            ? ["center", "start", "end", "self-start", "self-end", "flex-start", "flex-end"]
+            : ["center", "start", "end", "flex-start", "flex-end"];
+        if ($property === "justify_content") {
+            $positions[] = "left";
+            $positions[] = "right";
+        }
+
+        if (count($values) === 1) {
+            $keyword = $values[0];
+            if (($property === "align_self" && $keyword === "auto") || $keyword === "normal" || $keyword === "stretch"
+                || ($baseline && $keyword === "baseline") || in_array($keyword, $positions, true)
+                || ($content && in_array($keyword, ["space-between", "space-around", "space-evenly"], true))
+            ) {
+                return $keyword;
+            }
+            return null;
+        }
+
+        if ($baseline && count($values) === 2
+            && (($values[0] === "first" || $values[0] === "last") && $values[1] === "baseline")
+        ) {
+            return implode(" ", $values);
+        }
+
+        if (count($values) === 2 && ($values[0] === "safe" || $values[0] === "unsafe")
+            && in_array($values[1], $positions, true)
+        ) {
+            return implode(" ", $values);
+        }
+
+        return null;
+    }
+
+    protected function _compute_flex_direction(string $val): ?string
+    {
+        return $this->compute_flex_keyword($val, ["row", "row-reverse", "column", "column-reverse"]);
+    }
+
+    protected function _compute_flex_wrap(string $val): ?string
+    {
+        return $this->compute_flex_keyword($val, ["nowrap", "wrap", "wrap-reverse"]);
+    }
+
+    protected function _compute_order(string $val): ?int
+    {
+        return $this->compute_integer($val);
+    }
+
+    protected function _compute_flex_grow(string $val): ?float
+    {
+        return $this->compute_flex_factor($val);
+    }
+
+    protected function _compute_flex_shrink(string $val): ?float
+    {
+        return $this->compute_flex_factor($val);
+    }
+
+    protected function _compute_flex_basis(string $val)
+    {
+        $val = strtolower($val);
+        if (in_array($val, ["auto", "content", "min-content", "max-content", "fit-content"], true)) {
+            return $val;
+        }
+
+        if (preg_match("/^fit-content\\((.*)\\)$/s", $val, $matches)) {
+            $argument = trim($matches[1]);
+            if (count($this->parse_flexbox_value($argument)) !== 1) {
+                return null;
+            }
+            $computed = $this->compute_flex_length_percentage_positive($argument);
+            if ($computed === null) {
+                return null;
+            }
+            return "fit-content(" . (\is_string($computed) ? $computed : $computed . "pt") . ")";
+        }
+
+        $number = $this->compute_number($val);
+        if ($number !== null) {
+            return \is_finite($number) && $number == 0.0 ? 0.0 : null;
+        }
+
+        return $this->compute_flex_length_percentage_positive($val);
+    }
+
+    private function compute_flex_length_percentage_positive(string $val)
+    {
+        $computed = $this->compute_length_percentage_positive($val);
+        $validation = $this->single_length_in_pt($val, 12);
+        return $computed !== null && \is_finite($validation) ? $computed : null;
+    }
+
+    protected function _compute_justify_content(string $val): ?string
+    {
+        return $this->compute_flex_alignment($val, "justify_content");
+    }
+
+    protected function _compute_align_items(string $val): ?string
+    {
+        return $this->compute_flex_alignment($val, "align_items");
+    }
+
+    protected function _compute_align_self(string $val): ?string
+    {
+        return $this->compute_flex_alignment($val, "align_self");
+    }
+
+    protected function _compute_align_content(string $val): ?string
+    {
+        return $this->compute_flex_alignment($val, "align_content");
+    }
+
+    private function compute_gap(string $val)
+    {
+        if (strtolower($val) === "normal") {
+            return "normal";
+        }
+
+        $number = $this->compute_number($val);
+        if ($number !== null) {
+            return \is_finite($number) && $number == 0.0 ? 0.0 : null;
+        }
+
+        return $this->compute_flex_length_percentage_positive($val);
+    }
+
+    protected function _compute_row_gap(string $val)
+    {
+        return $this->compute_gap($val);
+    }
+
+    protected function _compute_column_gap(string $val)
+    {
+        return $this->compute_gap($val);
+    }
+
+    protected function _set_flex(string $val): array
+    {
+        $values = $this->parse_flexbox_value($val);
+        if ($values === []) {
+            return [];
+        }
+
+        $first = strtolower($values[0]);
+        if (count($values) === 1 && $first === "none") {
+            return ["flex_grow" => "0", "flex_shrink" => "0", "flex_basis" => "auto"];
+        }
+        if (count($values) === 1 && $first === "auto") {
+            return ["flex_grow" => "1", "flex_shrink" => "1", "flex_basis" => "auto"];
+        }
+
+        $basis_first = $this->_compute_flex_basis($values[0]) !== null
+            && $this->compute_flex_factor($values[0]) === null;
+        $basis = null;
+        $factors = [];
+        if ($basis_first) {
+            $basis = array_shift($values);
+        }
+
+        while ($values !== [] && count($factors) < 2) {
+            $factor = $this->compute_flex_factor($values[0]);
+            if ($factor === null) {
+                break;
+            }
+            $factors[] = array_shift($values);
+        }
+
+        if ($basis === null && $values !== []) {
+            $basis = array_shift($values);
+            if ($this->_compute_flex_basis($basis) === null) {
+                return [];
+            }
+        }
+
+        if ($values !== [] || ($basis === null && $factors === [])) {
+            return [];
+        }
+
+        return [
+            "flex_grow" => $factors[0] ?? "1",
+            "flex_shrink" => $factors[1] ?? "1",
+            "flex_basis" => $basis ?? "0"
+        ];
+    }
+
+    protected function _set_flex_flow(string $val): array
+    {
+        $values = $this->parse_flexbox_value($val);
+        if ($values === [] || count($values) > 2) {
+            return [];
+        }
+
+        $direction = null;
+        $wrap = null;
+        foreach ($values as $value) {
+            if (($computed = $this->_compute_flex_direction($value)) !== null) {
+                if ($direction !== null) {
+                    return [];
+                }
+                $direction = $computed;
+            } elseif (($computed = $this->_compute_flex_wrap($value)) !== null) {
+                if ($wrap !== null) {
+                    return [];
+                }
+                $wrap = $computed;
+            } else {
+                return [];
+            }
+        }
+
+        return array_filter([
+            "flex_direction" => $direction,
+            "flex_wrap" => $wrap
+        ], function ($value) {
+            return $value !== null;
+        });
+    }
+
+    protected function _set_gap(string $val): array
+    {
+        $values = $this->parse_flexbox_value($val);
+        if (count($values) < 1 || count($values) > 2
+            || $this->compute_gap($values[0]) === null
+            || (isset($values[1]) && $this->compute_gap($values[1]) === null)
+        ) {
+            return [];
+        }
+
+        return ["row_gap" => $values[0], "column_gap" => $values[1] ?? $values[0]];
     }
 
     /**
