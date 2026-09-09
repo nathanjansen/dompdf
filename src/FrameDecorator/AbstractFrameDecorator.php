@@ -630,6 +630,16 @@ abstract class AbstractFrameDecorator extends Frame
         return $this->_root;
     }
 
+    public function get_flex_layout(): ?array
+    {
+        $context = $this->_root ? $this->_root->get_flex_context() : null;
+        if ($context && $context->get_item() === $this && $context->get_item_layout() !== null) {
+            return $context->get_item_layout();
+        }
+        $parent = $this->get_parent();
+        return $parent instanceof Flex ? $parent->get_item_layout($this) : null;
+    }
+
     /**
      * @return Block
      */

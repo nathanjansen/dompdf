@@ -291,7 +291,7 @@ class Style
         "block",
         // "flow-root",
         "list-item",
-        // "flex",
+        "flex",
         // "grid",
         "table"
     ];
@@ -304,7 +304,7 @@ class Style
     public const INLINE_LEVEL_TYPES = [
         "inline",
         "inline-block",
-        // "inline-flex",
+        "inline-flex",
         // "inline-grid",
         "inline-table"
     ];
@@ -752,6 +752,9 @@ class Style
      * @var Style
      */
     protected $parent_style;
+
+    /** Whether decoration established that this element is a flex item. */
+    private $flex_item = false;
 
     /**
      * @var Frame|null
@@ -2930,6 +2933,12 @@ class Style
 
     /*======================*/
 
+    public function blockify_flex_item(): void
+    {
+        $this->flex_item = true;
+        unset($this->_props_computed["display"], $this->_props_used["display"]);
+    }
+
     /**
      * @link https://www.w3.org/TR/CSS21/visuren.html#display-prop
      */
@@ -2941,12 +2950,10 @@ class Style
         // appropriate fallback display type
         switch ($val) {
             case "flow-root":
-            case "flex":
             case "grid":
             case "table-caption":
                 $val = "block";
                 break;
-            case "inline-flex":
             case "inline-grid":
                 $val = "inline-block";
                 break;
@@ -2954,6 +2961,18 @@ class Style
 
         if (!isset(self::$valid_display_types[$val])) {
             return null;
+        }
+
+        if ($this->flex_item) {
+            if ($val === "inline-flex") {
+                return "flex";
+            }
+            if ($val === "inline-table") {
+                return "table";
+            }
+            if ($val === "inline" || $val === "inline-block" || in_array($val, self::TABLE_INTERNAL_TYPES, true)) {
+                return "block";
+            }
         }
 
         // https://www.w3.org/TR/CSS21/visuren.html#dis-pos-flo
@@ -2974,6 +2993,8 @@ class Style
                     return "block";
                 case "inline-table":
                     return "table";
+                case "inline-flex":
+                    return "flex";
                 default:
                     return $val;
             }

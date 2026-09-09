@@ -10,6 +10,39 @@ use Symfony\Component\Process\Process;
 
 class FlexLayoutContextTest extends TestCase
 {
+    public function testAssignedMeasurementCarriesNumericLayoutToPrivateCopy(): void
+    {
+        $dompdf = $this->document('<div style="display:flex;width:300pt"><section id="item" style="width:200pt;flex:0 0 100pt">AAAA AAAA AAAA AAAA</section></div>');
+        $this->inspectEntry($dompdf, function ($item) {
+            $before = $this->snapshot($item->get_root());
+            $context = new FlexLayoutContext($item, true, null);
+            foreach ([1, 2] as $repeat) {
+                $result = $context->layout();
+                $fragment = $result["fragment"];
+                $this->assertEquals(100, $fragment->get_content_box()["w"]);
+                $this->assertEqualsWithDelta(39.6, $result["consumed_block_size"], 0.01);
+                $this->assertEquals(300, $fragment->get_containing_block("w"));
+                $this->assertSame("200pt", $fragment->get_style()->get_specified("width"));
+                $this->assertSame($before, $this->snapshot($item->get_root()));
+            }
+        });
+    }
+
+    public function testNestedFlexMeasurementDoesNotFragmentOrCommit(): void
+    {
+        $children = str_repeat('<div style="height:20pt;page-break-inside:avoid">row</div>', 8);
+        $dompdf = $this->document('<section id="item"><div style="display:flex;width:100pt"><div style="width:100pt">' . $children . '</div></div></section>');
+        $this->inspectEntry($dompdf, function ($item) {
+            $before = $this->snapshot($item->get_root());
+            $context = new FlexLayoutContext($item, true, null);
+            $result = $context->layout();
+            $this->assertNull($result["continuation"]);
+            $this->assertEquals(160, $result["consumed_block_size"]);
+            $this->assertCount(8, $this->content($result["fragment"])[0]);
+            $this->assertSame($before, $this->snapshot($item->get_root()));
+        });
+    }
+
     private function document(string $content, string $css = "", array $callbacks = []): Dompdf
     {
         $dompdf = new Dompdf();

@@ -182,6 +182,17 @@ class Image extends AbstractFrameReflower
         [, , $cbw, $cbh] = $frame->get_containing_block();
         [$width, $height] = $this->calculate_size($cbw, $cbh);
 
+        $layout = $frame->get_flex_layout();
+        if ($layout) {
+            $width = $layout["width"];
+            if ($layout["height"] !== null) {
+                $height = $layout["height"];
+            } elseif ($style->height === "auto") {
+                [$imageWidth, $imageHeight] = $frame->get_intrinsic_dimensions();
+                $height = $width * $imageHeight / $imageWidth;
+            }
+        }
+
         if ($debug_png) {
             print $width . " " . $height . ";";
         }

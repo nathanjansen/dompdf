@@ -105,6 +105,8 @@ class Renderer extends AbstractRenderer
             case "block":
             case "list-item":
             case "inline-block":
+            case "flex":
+            case "inline-flex":
             case "table":
             case "inline-table":
                 $this->_render_frame("block", $frame);

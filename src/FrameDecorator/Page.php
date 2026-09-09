@@ -65,6 +65,58 @@ class Page extends AbstractFrameDecorator
         return $this->flex_contexts ? end($this->flex_contexts)[0] : null;
     }
 
+    public function get_bottom_page_edge(): float
+    {
+        return $this->bottom_page_edge;
+    }
+
+    private function is_in_absolute_positioned_subtree(Frame $frame): bool
+    {
+        // Break eligibility follows real ancestry, not the local search boundary.
+        do {
+            if ($frame->is_absolute()) {
+                return true;
+            }
+        } while ($frame = $frame->get_parent());
+        return false;
+    }
+
+    /** Check the container's own box, without backtracking into unlaid-out items. */
+    public function check_flex_container_break(AbstractFrameDecorator $frame): bool
+    {
+        $context = $this->get_flex_context();
+        if (($context && $context->is_measuring()) || $this->is_in_absolute_positioned_subtree($frame)) {
+            return false;
+        }
+        if (Helpers::lengthLessOrEqual($frame->get_position("y") + $frame->get_margin_height(), $this->bottom_page_edge)) {
+            return false;
+        }
+        $pageTop = $this->get_containing_block("y")
+            + (float) $this->get_style()->length_in_pt($this->get_style()->margin_top, $this->get_containing_block("h"));
+        if (!$frame->_already_pushed && Helpers::lengthGreater($frame->get_position("y"), $pageTop)) {
+            $frame->split(null, true);
+            $frame->_already_pushed = true;
+            $this->_page_full = true;
+            return true;
+        }
+        // An indivisible oversized box at page top has already been accepted.
+        $frame->_already_pushed = true;
+        return false;
+    }
+
+    /** Commit one prepared container remainder to the current (possibly local) flow. */
+    public function commit_flex_fragment(AbstractFrameDecorator $fragment, AbstractFrameDecorator $continuation): void
+    {
+        $fragment->get_parent()->insert_child_after($continuation, $fragment);
+        $context = $this->get_flex_context();
+        if ($context && $context->get_item() === $fragment) {
+            $context->capture_continuation($continuation, false);
+        } else {
+            $continuation->split(null, true);
+        }
+        $this->_page_full = true;
+    }
+
     public function push_flex_context(FlexLayoutContext $context): void
     {
         if ($context->get_item()->get_root() !== $this) {
@@ -611,13 +663,10 @@ class Page extends AbstractFrameDecorator
             }
         } while (($p = $p->get_parent()) && (!$context || $context->contains($p)));
 
-        // If the frame is absolute or fixed it shouldn't break
-        $p = $frame;
-        do {
-            if ($p->is_absolute()) {
-                return false;
-            }
-        } while (($p = $p->get_parent()) && (!$context || $context->contains($p)));
+        // If the frame or any ancestor is absolute or fixed it shouldn't break.
+        if ($this->is_in_absolute_positioned_subtree($frame)) {
+            return false;
+        }
 
         $margin_height = $frame->get_margin_height();
 

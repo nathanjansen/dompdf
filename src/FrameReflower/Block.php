@@ -231,6 +231,13 @@ class Block extends AbstractFrameReflower
             throw new Exception("Box property calculation requires containing block width");
         }
 
+        $layout = $frame->get_flex_layout();
+        if ($layout) {
+            return [$layout["width"],
+                (float) $style->length_in_pt($style->margin_left, $cb["w"]),
+                (float) $style->length_in_pt($style->margin_right, $cb["w"]), "auto", "auto"];
+        }
+
         $width = $style->length_in_pt($style->width, $cb["w"]);
 
         $values = $this->_calculate_width($width);
@@ -297,7 +304,9 @@ class Block extends AbstractFrameReflower
         $content_height = $this->_calculate_content_height();
         $cb = $frame->get_containing_block();
 
-        $height = $style->length_in_pt($style->height, $cb["h"]);
+        $layout = $frame->get_flex_layout();
+        $height = $layout && $layout["height"] !== null
+            ? $layout["height"] : $style->length_in_pt($style->height, $cb["h"]);
         $margin_top = $style->length_in_pt($style->margin_top, $cb["w"]);
         $margin_bottom = $style->length_in_pt($style->margin_bottom, $cb["w"]);
 

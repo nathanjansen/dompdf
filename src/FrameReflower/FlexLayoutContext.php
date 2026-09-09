@@ -26,6 +26,8 @@ class FlexLayoutContext
 {
     private $item;
     private $measuring;
+    private $snapshot;
+    private $item_layout;
     private $availableBlockSize;
     private $continuation;
     private $deferred = false;
@@ -33,7 +35,10 @@ class FlexLayoutContext
 
     public function __construct(AbstractFrameDecorator $item, bool $measuring, ?float $availableBlockSize)
     {
-        $this->measuring = $measuring;
+        $this->item_layout = $item->get_flex_layout();
+        $outer = $item->get_root()->get_flex_context();
+        $this->measuring = $measuring || ($outer && $outer->is_measuring());
+        $this->snapshot = $measuring;
         $this->availableBlockSize = $availableBlockSize;
         $this->item = $measuring ? $this->copy_measurement_tree($item) : $item;
     }
@@ -46,6 +51,11 @@ class FlexLayoutContext
     public function is_measuring(): bool
     {
         return $this->measuring;
+    }
+
+    public function get_item_layout(): ?array
+    {
+        return $this->item_layout;
     }
 
     public function get_available_block_size(): ?float
@@ -86,9 +96,10 @@ class FlexLayoutContext
      */
     public function layout(): array
     {
-        if ($this->measuring) {
+        if ($this->snapshot) {
             $context = new self($this->copy_measurement_tree($this->item), false, null);
             $context->measuring = true;
+            $context->item_layout = $this->item_layout;
             return $context->reflow();
         }
         return $this->reflow();
@@ -100,6 +111,9 @@ class FlexLayoutContext
         $page->push_flex_context($this);
         try {
             $this->item->reflow();
+            if (!$page->is_full()) {
+                $page->check_page_break($this->item);
+            }
             $fragment = $this->deferred ? null : $this->item;
             return [
                 "fragment" => $fragment,
@@ -149,6 +163,9 @@ class FlexLayoutContext
         $copy->is_split_off = $source->is_split_off;
         $cb = $source->get_containing_block();
         $copy->set_containing_block($cb["x"], $cb["y"], $cb["w"], $cb["h"]);
+        if ($copy instanceof Page) {
+            $copy->calculate_bottom_page_edge();
+        }
         $position = $source->get_position();
         $copy->set_position($position["x"], $position["y"]);
         if ($parent) {
