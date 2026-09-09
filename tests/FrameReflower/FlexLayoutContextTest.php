@@ -43,6 +43,40 @@ class FlexLayoutContextTest extends TestCase
         });
     }
 
+    public function testRepeatedFlexedMeasurementPreservesLiveStateAndCallbacks(): void
+    {
+        $dompdf = $this->document('<div style="display:flex;width:150pt"><section id="item" style="width:200pt;flex:1 1 100pt;min-width:0">'
+            . 'AAAA AAAA AAAA AAAA</section><div style="flex:1 1 100pt;min-width:0">B</div></div>',
+            'body {counter-reset:step 10} #item {counter-increment:step 2} #item:before {content:"N" counter(step)}');
+        $callbacks = 0;
+        $this->inspectEntry($dompdf, function ($item) use (&$callbacks) {
+            $before = $this->snapshot($item->get_root());
+            $count = $callbacks;
+            $context = new FlexLayoutContext($item, true, null);
+            $first = null;
+            foreach ([1, 2] as $repeat) {
+                $result = $context->layout();
+                $fragment = $result["fragment"];
+                $this->assertEquals(75, $fragment->get_content_box()["w"]);
+                $this->assertEquals(150, $fragment->get_containing_block("w"));
+                $this->assertSame("200pt", $fragment->get_style()->get_specified("width"));
+                $this->assertGreaterThan(20, $result["consumed_block_size"]);
+                $text = implode("", $this->content($fragment)[0]);
+                $this->assertSame("N12AAAAAAAAAAAAAAAA", preg_replace('/\s+/', '', $text));
+                $geometry = [$fragment->get_content_box(), $result["consumed_block_size"]];
+                if ($first !== null) {
+                    $this->assertSame($first, $geometry);
+                }
+                $first = $geometry;
+                $this->assertSame($before, $this->snapshot($item->get_root()));
+                $this->assertSame($count, $callbacks);
+            }
+        }, function () use (&$callbacks) {
+            $callbacks++;
+        });
+        $this->assertGreaterThan(0, $callbacks);
+    }
+
     private function document(string $content, string $css = "", array $callbacks = []): Dompdf
     {
         $dompdf = new Dompdf();

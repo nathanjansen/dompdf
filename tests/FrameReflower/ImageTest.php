@@ -141,6 +141,7 @@ class ImageTest extends TestCase
                 'get_style' => $style,
                 'get_parent' => $parentFrame,
                 'get_flex_layout' => null,
+                'get_root' => null,
                 'get_dompdf->getOptions->getDpi' => 75,
                 'get_image_url' => dirname(__DIR__) . '/_files/jamaica.jpg',
                 'get_dompdf->getHttpContext' => null

@@ -309,6 +309,49 @@ abstract class AbstractFrameReflower
      */
     abstract function reflow(?Block $block = null);
 
+    /** CSS percentage reference inside an item, independent of page availability. */
+    protected function get_percentage_height_reference(bool $inFlex = false): ?float
+    {
+        $frame = $this->_frame;
+        $root = $frame->get_root();
+        if (!$root || (!$inFlex && !$root->get_flex_context() && !($this instanceof Flex)) || $frame->is_absolute()) {
+            [, , , $height] = $frame->get_containing_block();
+            return $height;
+        }
+        $parent = $frame->get_parent();
+        // Inline wrappers forward the containing block; their height is not a reference.
+        while ($parent instanceof \Dompdf\FrameDecorator\Inline) {
+            $parent = $parent->get_parent();
+        }
+        if (!$parent) {
+            return null;
+        }
+        $layout = $parent->get_flex_layout();
+        if ($layout) {
+            return $layout["definite_height"] ? $layout["height"] : null;
+        }
+        $style = $parent->get_style();
+        $height = $style->get_computed("height");
+        $reflower = $parent->get_reflower();
+        if ($height === "auto") {
+            // Two positioned insets determine content height without laying out children.
+            if ($parent->is_absolute() && $reflower instanceof \Dompdf\FrameReflower\Block
+                && $style->get_computed("top") !== "auto" && $style->get_computed("bottom") !== "auto") {
+                return $reflower->_calculate_restricted_height()[0];
+            }
+            return null;
+        }
+        $reference = $reflower->get_percentage_height_reference(true);
+        if ($reference === null && \Dompdf\Helpers::is_percent($height)) {
+            return null;
+        }
+        $height = (float) $style->length_in_pt($height, $reference ?? 0);
+        $min = $reflower->resolve_min_height($reference);
+        $max = $reference === null && \Dompdf\Helpers::is_percent($style->get_computed("max_height"))
+            ? INF : $reflower->resolve_max_height($reference);
+        return max($min, min($height, $max));
+    }
+
     /**
      * Resolve the `min-width` property.
      *

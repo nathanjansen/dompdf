@@ -103,6 +103,7 @@ use Dompdf\Helpers;
  * @property float                $flex_grow
  * @property float                $flex_shrink
  * @property float|string         $flex_basis
+ * @property string               $box_sizing
  * @property string               $flex
  * @property string               $justify_content
  * @property string               $align_items
@@ -877,6 +878,7 @@ class Style
             $d["flex_grow"] = 0.0;
             $d["flex_shrink"] = 1.0;
             $d["flex_basis"] = "auto";
+            $d["box_sizing"] = "content-box";
             $d["flex"] = "";
             $d["justify_content"] = "flex-start";
             $d["align_items"] = "stretch";
@@ -1839,6 +1841,16 @@ class Style
         }
 
         return $this->_props[$prop] ?? self::$_defaults[$prop];
+    }
+
+    /** Get a computed longhand without substituting a layout-assigned used value. */
+    public function get_computed(string $prop)
+    {
+        $prop = self::$_props_alias[$prop] ?? $prop;
+        if (!isset(self::$_defaults[$prop]) && !$this->is_custom_property($prop)) {
+            throw new Exception("'$prop' is not a recognized CSS property.");
+        }
+        return $this->computed($prop);
     }
 
     /**
@@ -3625,6 +3637,12 @@ class Style
         }
 
         return $this->compute_flex_length_percentage_positive($val);
+    }
+
+    protected function _compute_box_sizing(string $val): ?string
+    {
+        $val = strtolower($val);
+        return in_array($val, ["content-box", "border-box"], true) ? $val : null;
     }
 
     private function compute_flex_length_percentage_positive(string $val)

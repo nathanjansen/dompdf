@@ -76,6 +76,112 @@ class FlexTest extends TestCase
         $this->assertEquals(100, $result["text"][1][1][1]);
     }
 
+    public static function flexibleSizeProvider(): array
+    {
+        return [
+            "N01 grow" => [300, "flex:1 1 100pt", "flex:1 1 100pt", 150, 150],
+            "N02 scaled shrink" => [200, "flex:0 1 200pt", "flex:0 1 100pt", 400 / 3, 200 / 3],
+            "N03 max freeze" => [300, "flex:1 1 100pt;max-width:120pt", "flex:1 1 100pt", 120, 180],
+            "N04 min freeze" => [150, "flex:0 1 100pt;min-width:90pt", "flex:0 1 100pt", 90, 60],
+            "N05 subunit" => [200, "flex:.25 1 0pt", "flex:.25 1 0pt", 50, 50],
+            "min wins max" => [200, "flex:1 1 100pt;min-width:140pt;max-width:120pt", "flex:1 1 100pt", 140, 60]
+        ];
+    }
+
+    /** @dataProvider flexibleSizeProvider */
+    #[\PHPUnit\Framework\Attributes\DataProvider('flexibleSizeProvider')]
+    public function testFlexibleSizesReachRealBoxes(float $width, string $a, string $b, float $aWidth, float $bWidth): void
+    {
+        $result = $this->layout('<div data-test="row" style="display:flex;width:' . $width . 'pt">'
+            . '<div data-test="a" style="min-width:0;height:20pt;' . $a . '">A</div>'
+            . '<div data-test="b" style="min-width:0;height:20pt;' . $b . '">B</div></div><div data-test="after">AFTER</div>');
+        $this->assertBox($result, "a", [0, 0, $aWidth, 20]);
+        $this->assertBox($result, "b", [$aWidth, 0, $bWidth, 20]);
+        $this->assertBox($result, "after", [0, 20, 400, 19.8]);
+        $this->assertSame(["A", "B", "AFTER"], array_column($result["text"][1], 0));
+        $this->assertEqualsWithDelta($aWidth, $result["text"][1][1][1], 0.01);
+    }
+
+    public function testFlexedWidthControlsTextWrappingAndPercentageDescendant(): void
+    {
+        $control = $this->layout('<div data-test="text" style="width:25pt">AAAA AAAA AAAA AAAA</div>', 'body {font:10pt/10pt Courier}');
+        $result = $this->layout('<div style="display:flex;width:100pt"><div data-test="a" style="width:200pt;flex:1 1 100pt;min-width:0">'
+            . '<div data-test="child" style="width:50%">AAAA AAAA AAAA AAAA</div></div>'
+            . '<div data-test="b" style="flex:1 1 100pt;min-width:0">B</div></div><div data-test="after">AFTER</div>',
+            'body {font:10pt/10pt Courier}');
+        $this->assertEqualsWithDelta(50, $result["boxes"]["a"][0]["content"][2], 0.01);
+        $this->assertEqualsWithDelta(25, $result["boxes"]["child"][0]["content"][2], 0.01);
+        $this->assertSame("200pt", $result["boxes"]["a"][0]["specified_width"]);
+        $this->assertSame(["AAAA", "AAAA", "AAAA", "AAAA", "B", "AFTER"], array_column($result["text"][1], 0));
+        $this->assertEqualsWithDelta($control["text"][1][3][2], $result["text"][1][3][2], 0.01);
+        $this->assertEqualsWithDelta($control["boxes"]["text"][0]["box"][3], $result["boxes"]["after"][0]["box"][1], 0.01);
+    }
+
+    public static function automaticMinimumProvider(): array
+    {
+        return [
+            "auto" => ["", 180, 0],
+            "explicit zero" => ["min-width:0", 0, 100],
+            "preferred width cap" => ["width:80pt", 80, 20],
+            "maximum cap" => ["max-width:70pt", 70, 30],
+            "hidden is scrollable" => ["overflow:hidden", 0, 100],
+            "auto is scrollable" => ["overflow:auto", 0, 100],
+            "scroll is scrollable" => ["overflow:scroll", 0, 100],
+            "clip is non-scrollable" => ["overflow:clip", 180, 0]
+        ];
+    }
+
+    /** @dataProvider automaticMinimumProvider */
+    #[\PHPUnit\Framework\Attributes\DataProvider('automaticMinimumProvider')]
+    public function testAutomaticMinimumUsesContentNotDefiniteBasis(string $constraint, float $aWidth, float $bWidth): void
+    {
+        // Courier has a literal 6pt advance at 10pt: 30 unbreakable glyphs = 180pt.
+        $result = $this->layout('<div style="display:flex;width:100pt"><div data-test="a" style="flex:1 1 0pt;' . $constraint . '">'
+            . str_repeat('M', 30) . '</div><div data-test="b" style="flex:1 1 100pt;min-width:0">B</div></div>', 'body {font:10pt Courier}');
+        $this->assertEqualsWithDelta($aWidth, $result["boxes"]["a"][0]["content"][2], 0.01);
+        $this->assertEqualsWithDelta($bWidth, $result["boxes"]["b"][0]["content"][2], 0.01);
+        $this->assertEqualsWithDelta($aWidth, $result["boxes"]["b"][0]["box"][0], 0.01);
+    }
+
+    public static function sizingEdgesProvider(): array
+    {
+        return [
+            "negative border-box base" => ["box-sizing:border-box;flex:1 1 0pt;padding:0 10pt;border:2pt solid", 76, 100, 200],
+            "zero content-box base" => ["box-sizing:content-box;flex:1 1 0pt;padding:0 10pt;border:2pt solid", 88, 112, 188],
+            "percentage border-box basis and edges" => ["box-sizing:border-box;flex:1 1 25%;padding:0 10%;border:2pt solid;margin:0 10pt", 63.5, 147.5, 152.5],
+            "percentage content-box basis and edges" => ["box-sizing:content-box;flex:1 1 25%;padding:0 10%;border:2pt solid;margin:0 10pt", 95.5, 179.5, 120.5]
+        ];
+    }
+
+    /** @dataProvider sizingEdgesProvider */
+    #[\PHPUnit\Framework\Attributes\DataProvider('sizingEdgesProvider')]
+    public function testBoxSizingConvertsBaseWithoutDoubleCountingEdges(string $a, float $aWidth, float $bX, float $bWidth): void
+    {
+        $result = $this->layout('<div style="display:flex;width:300pt"><div data-test="a" style="min-width:0;' . $a
+            . '">A</div><div data-test="b" style="min-width:0;flex:1 1 100pt">B</div></div>');
+        $this->assertEqualsWithDelta($aWidth, $result["boxes"]["a"][0]["content"][2], 0.01);
+        $this->assertEqualsWithDelta($bX, $result["boxes"]["b"][0]["box"][0], 0.01);
+        $this->assertEqualsWithDelta($bWidth, $result["boxes"]["b"][0]["content"][2], 0.01);
+        $this->assertEquals(300, $result["boxes"]["a"][0]["cb_width"]);
+    }
+
+    public static function intrinsicBasisProvider(): array
+    {
+        return ["min" => ["min-content", 24], "max" => ["max-content", 114],
+            "content" => ["content", 114], "fit percent" => ["fit-content(25%)", 50], "fit" => ["fit-content", 114]];
+    }
+
+    /** @dataProvider intrinsicBasisProvider */
+    #[\PHPUnit\Framework\Attributes\DataProvider('intrinsicBasisProvider')]
+    public function testIntrinsicBasisMeasuresContentWithoutOwnWidthOrPercentageEdges(string $basis, float $expected): void
+    {
+        $result = $this->layout('<div style="display:flex;width:200pt"><div data-test="a" style="width:160pt;min-width:0;flex:0 0 ' . $basis
+            . ';padding:0 10%">AAAA AAAA AAAA AAAA</div><div data-test="b" style="flex:0 0 10pt">B</div></div>', 'body {font:10pt Courier}');
+        $this->assertEqualsWithDelta($expected, $result["boxes"]["a"][0]["content"][2], 0.01);
+        $this->assertEqualsWithDelta($expected + 40, $result["boxes"]["b"][0]["box"][0], 0.01);
+        $this->assertSame("160pt", $result["boxes"]["a"][0]["specified_width"]);
+    }
+
     public function testInlineFlexIsOneAtomicOuterInline(): void
     {
         $result = $this->layout('<span data-test="before" style="display:inline-block;width:20pt;height:20pt">P</span>'
@@ -171,17 +277,173 @@ class FlexTest extends TestCase
     public function testDirectImageKeepsAssignedWidthAndIntrinsicRatio(): void
     {
         $result = $this->layout('<div style="display:flex;width:200pt"><img data-test="image" src="' . $this->image()
-            . '" style="width:200pt;flex:0 0 80pt"><div data-test="b" style="width:50pt;height:20pt">B</div></div>');
+            . '" style="width:200pt;flex:0 0 80pt;min-width:0"><div data-test="b" style="width:50pt;height:20pt">B</div></div>');
         $this->assertBox($result, "image", [0, 0, 80, 40]);
         $this->assertBox($result, "b", [80, 0, 50, 20]);
         $this->assertSame(\Dompdf\FrameDecorator\Image::class, $result["boxes"]["image"][0]["class"]);
         $this->assertSame("200pt", $result["boxes"]["image"][0]["specified_width"]);
     }
 
+    public static function replacedSizingProvider(): array
+    {
+        return [
+            "default minimum not basis cap" => [200, "width:200pt;flex:0 0 80pt", "flex:0 0 50pt", 150, 75, 50],
+            "transferred auto basis" => [150, "height:40pt;flex:1 1 auto", "flex:1 1 100pt", 80, 40, 70],
+            "preferred cap on transfer" => [150, "width:60pt;height:40pt;flex:0 1 auto", "flex:1 1 100pt", 60, 40, 90],
+            "cross maximum clamps auto height" => [150, "flex:0 0 80pt;min-width:0;max-height:20pt", "flex:1 1 100pt", 80, 20, 70],
+            "cross minimum clamps auto height" => [150, "flex:0 0 80pt;min-width:0;min-height:60pt", "flex:1 1 100pt", 80, 60, 70],
+            "main maximum caps auto minimum" => [150, "flex:1 1 auto;max-width:60pt", "flex:1 1 100pt", 60, 30, 90],
+            "auto basis cross maximum" => [300, "flex:none;max-height:20pt", "flex:1 1 100pt", 40, 20, 260],
+            "auto basis cross minimum" => [300, "flex:none;min-height:100pt", "flex:1 1 100pt", 200, 100, 100]
+        ];
+    }
+
+    /** @dataProvider replacedSizingProvider */
+    #[\PHPUnit\Framework\Attributes\DataProvider('replacedSizingProvider')]
+    public function testReplacedSizingUsesNaturalRatioAndSuggestions(float $rowWidth, string $imageStyle, string $peerStyle, float $w, float $h, float $peerWidth): void
+    {
+        $result = $this->layout('<div style="display:flex;width:' . $rowWidth . 'pt"><img data-test="image" src="' . $this->image()
+            . '" style="align-self:flex-start;' . $imageStyle . '"><div data-test="b" style="min-width:0;' . $peerStyle . '">B</div></div>');
+        $this->assertBox($result, "image", [0, 0, $w, $h]);
+        $this->assertEqualsWithDelta($w, $result["boxes"]["b"][0]["box"][0], 0.01);
+        $this->assertEqualsWithDelta($peerWidth, $result["boxes"]["b"][0]["content"][2], 0.01);
+    }
+
+    public static function percentageHeightProvider(): array
+    {
+        return [
+            "auto item auto container" => ["", "", 10, 12],
+            "auto item definite container" => ["height:100pt", "", 10, 12],
+            "definite item" => ["", "height:80pt", 40, 40],
+            "max clamped item" => ["", "height:80pt;max-height:40pt", 20, 20],
+            "min wins height max" => ["", "height:20pt;min-height:60pt;max-height:40pt", 30, 30],
+            "percentage item definite container" => ["height:120pt", "height:50%", 30, 30],
+            "percentage item auto container" => ["", "height:50%", 10, 12],
+            "percentage container auto parent" => ["height:50%", "height:50%", 10, 12],
+            "border-box assigned cross size" => ["", "height:80pt;box-sizing:border-box;padding:10pt;border:2pt solid", 28, 28]
+        ];
+    }
+
+    /** @dataProvider percentageHeightProvider */
+    #[\PHPUnit\Framework\Attributes\DataProvider('percentageHeightProvider')]
+    public function testPercentageHeightUsesDefiniteContentReference(string $container, string $item, float $imageHeight, float $blockHeight): void
+    {
+        $result = $this->layout('<div style="display:flex;width:200pt;' . $container . '"><div data-test="item" style="flex:none;width:150pt;align-self:flex-start;' . $item . '">'
+            . '<span style="height:999pt"><span><img data-test="image" src="' . $this->image() . '" style="width:20pt;height:50%;vertical-align:top"></span></span>'
+            . '<div data-test="percent" style="height:50%"><div style="height:12pt"></div></div></div></div>', '@page {size:400pt 500pt}');
+        $this->assertEqualsWithDelta(20, $result["boxes"]["image"][0]["content"][2], 0.01);
+        $this->assertEqualsWithDelta($imageHeight, $result["boxes"]["image"][0]["content"][3], 0.01);
+        $this->assertEqualsWithDelta($blockHeight, $result["boxes"]["percent"][0]["content"][3], 0.01);
+    }
+
+    public function testPercentageFlexContainerUsesDefiniteAncestorHeight(): void
+    {
+        $result = $this->layout('<section style="height:100pt"><div data-test="row" style="display:flex;width:200pt;height:50%">'
+            . '<div data-test="item" style="flex:none;width:100pt;height:50%;align-self:flex-start"><span><img data-test="image" src="' . $this->image()
+            . '" style="width:20pt;height:50%"></span></div></div></section>');
+        $this->assertEqualsWithDelta(50, $result["boxes"]["row"][0]["content"][3], 0.01);
+        $this->assertEqualsWithDelta(25, $result["boxes"]["item"][0]["content"][3], 0.01);
+        $this->assertEqualsWithDelta(12.5, $result["boxes"]["image"][0]["content"][3], 0.01);
+    }
+
+    public function testPercentageHeightChainDoesNotTurnPageSpaceIntoDefiniteSize(): void
+    {
+        foreach (["auto" => 10, "80pt" => 5] as $ancestorHeight => $imageHeight) {
+            $result = $this->layout('<section style="height:' . $ancestorHeight . '"><div style="height:50%">'
+                . '<div style="display:flex;width:200pt;height:50%"><div style="width:100pt;flex:none;align-self:flex-start;height:50%">'
+                . '<span><img data-test="image" src="' . $this->image() . '" style="width:20pt;height:50%"></span></div></div></div></section>');
+            $this->assertEqualsWithDelta($imageHeight, $result["boxes"]["image"][0]["content"][3], 0.01);
+        }
+    }
+
+    public static function positionedHeightReferenceProvider(): array
+    {
+        return [
+            "absolute two insets" => ["absolute", "top:0;bottom:0", 37.5],
+            "fixed two insets" => ["fixed", "top:0;bottom:0", 37.5],
+            "percentage insets and width-relative edges" => ["absolute", "top:10%;bottom:20%;margin:2%;padding:3%;border:2pt solid", 19.5],
+            "fixed percentage insets and edges" => ["fixed", "top:10%;bottom:20%;margin:2%;padding:3%;border:2pt solid", 19.5],
+            "auto margins" => ["absolute", "top:20pt;bottom:40pt;margin:auto", 30],
+            "absolute missing bottom" => ["absolute", "top:0", 10],
+            "fixed missing top" => ["fixed", "bottom:0", 10],
+            "absolute content height" => ["absolute", "", 10]
+        ];
+    }
+
+    /** @dataProvider positionedHeightReferenceProvider */
+    #[\PHPUnit\Framework\Attributes\DataProvider('positionedHeightReferenceProvider')]
+    public function testPercentageHeightRecognizesOnlyContentIndependentPositionedHeight(string $position, string $constraints, float $imageHeight): void
+    {
+        $result = $this->layout('<article style="position:' . $position . ';width:200pt;' . $constraints . '">'
+            . '<div data-test="row" style="display:flex;width:100pt;height:50%"><div data-test="item" style="flex:none;width:100pt;height:50%;align-self:flex-start">'
+            . '<span style="height:999pt"><img data-test="image" src="' . $this->image() . '" style="width:20pt;height:50%"></span>'
+            . '</div></div></article><div>FLOW</div>', '@page {size:500pt 300pt}', 1);
+        $this->assertSame(1, $result["pages"]);
+        $this->assertEqualsWithDelta(20, $result["boxes"]["image"][0]["content"][2], 0.01);
+        $this->assertEqualsWithDelta($imageHeight, $result["boxes"]["image"][0]["content"][3], 0.01);
+        if ($imageHeight !== 10.0) {
+            $this->assertEqualsWithDelta($imageHeight * 4, $result["boxes"]["row"][0]["content"][3], 0.01);
+            $this->assertEqualsWithDelta($imageHeight * 2, $result["boxes"]["item"][0]["content"][3], 0.01);
+        }
+        $this->assertContains("FLOW", array_column($result["text"][1], 0));
+    }
+
+    /** @dataProvider positionedHeightReferenceProvider */
+    #[\PHPUnit\Framework\Attributes\DataProvider('positionedHeightReferenceProvider')]
+    public function testPositionedFlexContainerPassesInsetHeightToItems(string $position, string $constraints, float $ancestorImageHeight): void
+    {
+        $imageHeight = $ancestorImageHeight === 10.0 ? 10.0 : $ancestorImageHeight * 2;
+        $result = $this->layout('<div data-test="row" style="position:' . $position . ';display:flex;width:200pt;' . $constraints . '">'
+            . '<div data-test="item" style="flex:none;width:100pt;height:50%;align-self:flex-start"><span><img data-test="image" src="'
+            . $this->image() . '" style="width:20pt;height:50%"></span></div></div><div>FLOW</div>', '@page {size:500pt 300pt}', 1);
+        $this->assertSame(1, $result["pages"]);
+        $this->assertEqualsWithDelta($imageHeight, $result["boxes"]["image"][0]["content"][3], 0.01);
+        if ($imageHeight !== 10.0) {
+            $this->assertEqualsWithDelta($imageHeight * 4, $result["boxes"]["row"][0]["content"][3], 0.01);
+            $this->assertEqualsWithDelta($imageHeight * 2, $result["boxes"]["item"][0]["content"][3], 0.01);
+        }
+        $this->assertContains("FLOW", array_column($result["text"][1], 0));
+    }
+
+    public function testAutoCrossMinimumUsesContentBoxWithoutMakingHeightDefinite(): void
+    {
+        $result = $this->layout('<div style="display:flex;width:200pt"><div data-test="item" style="flex:none;width:100pt;align-self:flex-start;'
+            . 'box-sizing:border-box;padding:10pt;border:2pt solid;min-height:80pt"><div data-test="child" style="height:50%">'
+            . '<div style="height:12pt"></div></div></div></div>');
+        $this->assertEqualsWithDelta(56, $result["boxes"]["item"][0]["content"][3], 0.01);
+        $this->assertEqualsWithDelta(80, $result["boxes"]["item"][0]["box"][3], 0.01);
+        $this->assertEqualsWithDelta(12, $result["boxes"]["child"][0]["content"][3], 0.01);
+    }
+
+    public function testFlexedContinuationKeepsResolvedOriginalSlot(): void
+    {
+        $html = '<article><div style="display:flex;width:200pt">';
+        foreach (["A" => 3, "B" => 8] as $prefix => $count) {
+            $html .= '<div data-test="' . $prefix . '" style="flex:1 1 50pt;min-width:0">';
+            for ($i = 1; $i <= $count; $i++) {
+                $html .= '<div style="height:20pt;page-break-inside:avoid">' . $prefix . $i . '</div>';
+            }
+            $html .= '</div>';
+        }
+        $result = $this->layout($html . '</div></article><div>AFTER</div>', '@page {size:200pt 100pt}');
+        $this->assertSame(2, $result["pages"]);
+        $this->assertSame(["A1", "A2", "A3", "B1", "B2", "B3", "B4", "B5"], array_column($result["text"][1], 0));
+        $this->assertSame(["B6", "B7", "B8", "AFTER"], array_column($result["text"][2], 0));
+        $this->assertBox($result, "A", [0, 0, 100, 60]);
+        $this->assertBox($result, "B", [100, 0, 100, 60], 1);
+    }
+
+    public function testUnrepresentableLineGeometryFailsWithoutPaginationLoop(): void
+    {
+        $this->expectException(\OverflowException::class);
+        $this->layout('<div style="display:flex;width:100pt"><div style="flex:0 0 1e308pt;min-width:0"></div>'
+            . '<div style="flex:0 0 1e308pt;min-width:0"></div></div>', '', 1);
+    }
+
     public function testWholeDeferredItemsKeepOriginalSlots(): void
     {
         foreach ([false, true] as $image) {
-            $first = $image ? '<img data-test="a" src="' . $this->image() . '" style="flex:0 0 100pt">'
+            $first = $image ? '<img data-test="a" src="' . $this->image() . '" style="flex:0 0 100pt;min-width:0">'
                 : '<div data-test="a" style="width:100pt;height:40pt"></div>';
             $result = $this->layout('<div style="height:80pt">BEFORE</div><div style="display:flex;width:200pt">' . $first
                 . '<div data-test="b" style="width:100pt;height:20pt">B</div></div><div data-test="after">AFTER</div>', '@page {size:200pt 100pt}');

@@ -180,17 +180,27 @@ class Image extends AbstractFrameReflower
         }
 
         [, , $cbw, $cbh] = $frame->get_containing_block();
-        [$width, $height] = $this->calculate_size($cbw, $cbh);
-
+        $cbh = $this->get_percentage_height_reference();
         $layout = $frame->get_flex_layout();
         if ($layout) {
             $width = $layout["width"];
             if ($layout["height"] !== null) {
                 $height = $layout["height"];
-            } elseif ($style->height === "auto") {
+            } else {
                 [$imageWidth, $imageHeight] = $frame->get_intrinsic_dimensions();
                 $height = $width * $imageHeight / $imageWidth;
+                $min = $this->resolve_min_height($cbh);
+                $max = $cbh === null && Helpers::is_percent($style->max_height) ? INF : $this->resolve_max_height($cbh);
+                if ($style->box_sizing === "border-box") {
+                    $edges = (float) $style->length_in_pt([$style->padding_top, $style->padding_bottom,
+                        $style->border_top_width, $style->border_bottom_width], $cbw);
+                    $min = max(0.0, $min - $edges);
+                    $max = max(0.0, $max - $edges);
+                }
+                $height = max($min, min($height, $max));
             }
+        } else {
+            [$width, $height] = $this->calculate_size($cbw, $cbh);
         }
 
         if ($debug_png) {

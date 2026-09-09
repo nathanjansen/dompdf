@@ -9,17 +9,20 @@ class EntryBlock extends Block
 {
     private $inspect;
 
-    public function __construct(BlockFrame $frame, callable $inspect)
+    public function __construct(BlockFrame $frame, $inspect = null)
     {
         parent::__construct($frame);
-        $this->inspect = $inspect;
+        // Private measurement copies use the native reflower constructor shape.
+        $this->inspect = is_callable($inspect) ? $inspect : null;
     }
 
     public function reflow(?BlockFrame $block = null)
     {
         $this->_frame->set_reflower(new Block($this->_frame));
         $cb = [$this->_frame->get_containing_block("x"), $this->_frame->get_containing_block("y"), $this->_frame->get_containing_block("w"), $this->_frame->get_containing_block("h")];
-        ($this->inspect)($this->_frame);
+        if ($this->inspect) {
+            ($this->inspect)($this->_frame);
+        }
         $this->_frame->set_containing_block(...$cb);
         parent::reflow($block);
     }

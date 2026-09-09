@@ -305,8 +305,10 @@ class Block extends AbstractFrameReflower
         $cb = $frame->get_containing_block();
 
         $layout = $frame->get_flex_layout();
-        $height = $layout && $layout["height"] !== null
-            ? $layout["height"] : $style->length_in_pt($style->height, $cb["h"]);
+        $heightReference = $this->get_percentage_height_reference();
+        $height = $layout ? ($layout["height"] ?? "auto")
+            : ($heightReference === null && Helpers::is_percent($style->height)
+                ? "auto" : $style->length_in_pt($style->height, $heightReference ?? 0));
         $margin_top = $style->length_in_pt($style->margin_top, $cb["w"]);
         $margin_bottom = $style->length_in_pt($style->margin_bottom, $cb["w"]);
 
@@ -418,9 +420,18 @@ class Block extends AbstractFrameReflower
 
             // Handle min/max height
             // https://www.w3.org/TR/CSS21/visudet.html#min-max-heights
-            $min_height = $this->resolve_min_height($cb["h"]);
-            $max_height = $this->resolve_max_height($cb["h"]);
-            $height = Helpers::clamp($height, $min_height, $max_height);
+            if (!$layout || $layout["height"] === null) {
+                $min_height = $this->resolve_min_height($heightReference);
+                $max_height = $heightReference === null && Helpers::is_percent($style->max_height)
+                    ? INF : $this->resolve_max_height($heightReference);
+                if ($layout && $style->box_sizing === "border-box") {
+                    $edges = (float) $style->length_in_pt([$style->padding_top, $style->padding_bottom,
+                        $style->border_top_width, $style->border_bottom_width], $cb["w"]);
+                    $min_height = max(0.0, $min_height - $edges);
+                    $max_height = max(0.0, $max_height - $edges);
+                }
+                $height = Helpers::clamp($height, $min_height, $max_height);
+            }
         }
 
         // TODO: Need to also take min/max height into account for absolute
@@ -857,7 +868,11 @@ class Block extends AbstractFrameReflower
 
         $cb_y = $y + $top;
 
-        $height = $style->length_in_pt($style->height, $cb["h"]);
+        $layout = $this->_frame->get_flex_layout();
+        $heightReference = $this->get_percentage_height_reference();
+        $height = $layout ? ($layout["height"] ?? "auto")
+            : ($heightReference === null && Helpers::is_percent($style->height)
+                ? "auto" : $style->length_in_pt($style->height, $heightReference ?? 0));
         if ($height === "auto") {
             $height = ($cb["h"] + $cb["y"]) - $bottom - $cb_y;
         }
