@@ -16,8 +16,21 @@ class Flex extends Block
     /** Resolved physical slots, retained through ancestor continuation reset. */
     private $continuation_slots = [];
 
-    /** Remaining physical column extent, not its CSS percentage reference. */
+    /** Remaining physical container height, not its CSS percentage reference. */
     private $continuation_extent;
+
+    /** Remaining line geometry; item membership lives in the durable slots. */
+    private $continuation_lines = [];
+
+    public function get_continuation_lines(): array
+    {
+        return $this->continuation_lines;
+    }
+
+    public function set_continuation_lines(array $lines): void
+    {
+        $this->continuation_lines = $lines;
+    }
 
     public function get_continuation_extent(): ?float
     {

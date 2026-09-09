@@ -187,6 +187,8 @@ class Flex extends Block
         $column = in_array($style->flex_direction, ["column", "column-reverse"], true);
         $reverse = $column ? $style->flex_direction === "column-reverse"
             : (($style->direction === "rtl") !== ($style->flex_direction === "row-reverse"));
+        $wrap = $style->flex_wrap !== "nowrap";
+        $crossReverse = ($column && $style->direction === "rtl") !== ($style->flex_wrap === "wrap-reverse");
         $cb = $frame->get_containing_block();
         [$width, $leftMargin, $rightMargin, $left, $right] = $this->_calculate_restricted_width();
         $style->set_used("width", $width);
@@ -207,7 +209,7 @@ class Flex extends Block
             $height = $minimumHeight;
         }
         $logicalHeight = $height === "auto" ? null : $height;
-        if ($column && $frame->get_continuation_extent() !== null) {
+        if (($column || $wrap) && $frame->get_continuation_extent() !== null) {
             $height = $minimumHeight = $frame->get_continuation_extent();
         }
         $style->set_used("height", $minimumHeight);
@@ -219,8 +221,18 @@ class Flex extends Block
         $available = max(0.0, $page->get_bottom_page_edge() - $box["y"]);
         $available = max(0.0, $available - (float) $style->computed_bottom_spacing($cb["w"]));
         $childHeight = $height === "auto" ? $available : $height;
+        // Cyclic percentages resolve against zero, retaining calc() length terms.
+        $widthReference = $style->display === "inline-flex" && $style->get_computed("width") === "auto" && !$layout ? 0.0 : $width;
+        $gapHeight = $logicalHeight;
+        if ($layout) {
+            $gapHeight = $layout["definite_height"]
+                ? (array_key_exists("reference_height", $layout) ? $layout["reference_height"] : $logicalHeight) : null;
+        }
+        $rowGap = $style->row_gap === "normal" ? 0.0 : (float) $style->length_in_pt($style->row_gap, $gapHeight ?? 0.0);
+        $columnGap = $style->column_gap === "normal" ? 0.0 : (float) $style->length_in_pt($style->column_gap, $widthReference);
+        $mainGap = $column ? $rowGap : $columnGap;
+        $crossGap = $column ? $columnGap : $rowGap;
         $this->content_height = 0.0;
-        $offset = 0.0;
         $continuations = [];
         $items = $frame->get_flex_items();
         $sourceOrder = [];
@@ -229,9 +241,11 @@ class Flex extends Block
         }
         $slots = [];
         $sizing = [];
+        $lines = $frame->get_continuation_lines();
+        $membership = [];
         $extent = $column ? ($height === "auto" ? 0.0 : $height) : $width;
 
-        // Resolve the complete line before any live item can split prepared content.
+        // Collect every sizing input before any live item can split prepared content.
         foreach ($items as $index => $item) {
             $item->set_containing_block($box["x"], $box["y"], $width, $childHeight);
             $slot = $frame->get_continuation_slot($item);
@@ -249,82 +263,188 @@ class Flex extends Block
                 }
             }
             $slots[$index] = $slot;
+            if (isset($slot["line"])) {
+                $membership[$slot["line"]][] = $index;
+            }
         }
         if ($column && $height === "auto") {
+            $extent += max(0, count($items) - 1) * $mainGap;
             $this->content_height = $extent;
             [$extent] = $this->_calculate_restricted_height();
             $this->content_height = 0.0;
         }
         if ($sizing) {
-            $sizes = FlexLine::resolve($sizing, $extent, 0.0);
-            foreach ($slots as $index => &$slot) {
-                $slot["offset"] = $reverse ? $extent - $offset - $sizes[$index] - $sizing[$index]["outer"] : $offset;
-                $slot[$column ? "height" : "width"] = $sizes[$index];
-                $slot["outer"] = $sizing[$index]["outer"];
-                if ($column) {
-                    $slot["reference_height"] = $slot["definite_height"] ? $sizes[$index] : null;
+            $finiteMain = !$column || $logicalHeight !== null || ($style->max_height !== "none"
+                && ($heightReference !== null || !Helpers::is_percent($style->max_height)));
+            $lineId = 0;
+            $length = 0.0;
+            foreach ($sizing as $index => $sizes) {
+                $outer = $sizes["hypothetical"] + $sizes["outer"];
+                $gap = isset($membership[$lineId]) ? $mainGap : 0.0;
+                if ($wrap && $finiteMain && isset($membership[$lineId]) && $length + $gap + $outer > $extent) {
+                    $lineId++;
+                    $length = $gap = 0.0;
                 }
-                $offset += $sizes[$index] + $slot["outer"];
+                $membership[$lineId][] = $index;
+                $length += $gap + $outer;
             }
-            unset($slot);
+            $crossExtent = 0.0;
+            foreach ($membership as $lineId => $members) {
+                $lineSizing = [];
+                foreach ($members as $index) {
+                    $lineSizing[$index] = $sizing[$index];
+                }
+                $sizes = array_combine($members, FlexLine::resolve($lineSizing, $extent, $mainGap));
+                $offset = 0.0;
+                $crossSize = 0.0;
+                foreach ($members as $index) {
+                    $slot = &$slots[$index];
+                    $slot["line"] = $lineId;
+                    $slot["offset"] = $reverse ? $extent - $offset - $sizes[$index] - $sizing[$index]["outer"] : $offset;
+                    $slot[$column ? "height" : "width"] = $sizes[$index];
+                    $slot["outer"] = $sizing[$index]["outer"];
+                    if ($column) {
+                        $slot["reference_height"] = $slot["definite_height"] ? $sizes[$index] : null;
+                        $crossSize = max($crossSize, $slot["width"] + $slot["cross_outer"]);
+                    } elseif ($wrap) {
+                        // Native isolated layout at the final main size determines line height.
+                        $frame->set_item_layout($items[$index], ["x" => $box["x"], "y" => $box["y"],
+                            "width" => $slot["width"], "height" => $slot["height"], "definite_width" => true,
+                            "definite_height" => $slot["height"] !== null]);
+                        $probe = (new FlexLayoutContext($items[$index], true, null))->layout();
+                        $slot["cross_size"] = $probe["consumed_block_size"];
+                        $crossSize = max($crossSize, $probe["consumed_block_size"]);
+                    }
+                    $offset += $sizes[$index] + $slot["outer"] + $mainGap;
+                    unset($slot);
+                }
+                if (!$wrap) {
+                    $crossSize = $column ? $width : ($logicalHeight ?? $crossSize);
+                }
+                $lines[$lineId] = ["offset" => $crossExtent, "cross_size" => $crossSize, "extent" => $extent];
+                $crossExtent += $crossSize + $crossGap;
+            }
+            $crossExtent = max(0.0, $crossExtent - $crossGap);
+            if ($crossReverse) {
+                $crossExtent = $column ? $width : ($logicalHeight ?? $crossExtent);
+                foreach ($lines as &$line) {
+                    $line["offset"] = $crossExtent - $line["offset"] - $line["cross_size"];
+                }
+                unset($line);
+            }
         }
 
-        $visits = array_keys($items);
-        if ($column) {
-            usort($visits, function ($a, $b) use ($slots) {
-                return ($slots[$a]["offset"] <=> $slots[$b]["offset"]) ?: ($a <=> $b);
-            });
-        }
         $canForce = !$page->get_flex_context() || !$page->get_flex_context()->is_measuring();
         for ($ancestor = $frame; $ancestor; $ancestor = $ancestor->get_parent()) {
             if ($ancestor->get_style()->position === "fixed") {
                 $canForce = false;
             }
         }
-        $cut = 0.0;
-        foreach ($visits as $visit => $index) {
-            $item = $items[$index];
-            $slot = $slots[$index];
-            $x = $column ? ($style->direction === "rtl" ? $width - $slot["width"] - $slot["cross_outer"] : 0.0) : $slot["offset"];
-            $y = $column ? $slot["offset"] : 0.0;
-            $assignment = ["x" => $box["x"] + $x, "y" => $box["y"] + $y,
-                "width" => $slot["width"], "height" => $slot["height"], "definite_width" => true,
-                "definite_height" => $column ? $slot["definite_height"] : $slot["height"] !== null];
+        $lineVisits = array_keys($membership);
+        usort($lineVisits, function ($a, $b) use ($lines) {
+            return ($lines[$a]["offset"] <=> $lines[$b]["offset"]) ?: ($a <=> $b);
+        });
+        $nextLines = [];
+        $nextExtent = 0.0;
+        foreach ($lineVisits as $lineVisit => $lineId) {
+            $line = $lines[$lineId];
+            $visits = $membership[$lineId];
             if ($column) {
-                $assignment["reference_height"] = $slot["reference_height"];
+                usort($visits, function ($a, $b) use ($slots) {
+                    return ($slots[$a]["offset"] <=> $slots[$b]["offset"]) ?: ($a <=> $b);
+                });
             }
-            $frame->set_item_layout($item, $assignment);
-            $item->set_positioner(new FlexPositioner());
-            $forced = $column && $canForce && in_array($item->get_style()->page_break_before, ["always", "left", "right"], true);
-            if ($forced) {
-                $item->get_style()->page_break_before = "auto";
-                $result = ["fragment" => null, "continuation" => $item, "consumed_block_size" => 0.0];
-            } else {
-                $result = (new FlexLayoutContext($item, false, $available))->layout();
-            }
-            if ($result["fragment"]) {
-                if ($column && $result["continuation"] && $item->get_reflower() instanceof Block) {
-                    $prefix = max(0.0, $item->get_reflower()->_calculate_content_height());
-                    $item->get_style()->set_used("height", $prefix);
-                    $result["consumed_block_size"] = $item->get_margin_height();
-                    $slot["height"] = max(0.0, $slot["height"] - $prefix);
+            $lineBottom = $column ? 0.0 : $line["offset"];
+            $lineContinuations = [];
+            $cut = 0.0;
+            foreach ($visits as $visit => $index) {
+                $item = $items[$index];
+                $slot = $slots[$index];
+                $x = $column ? $line["offset"] + ($crossReverse ? $line["cross_size"] - $slot["width"] - $slot["cross_outer"] : 0.0) : $slot["offset"];
+                $y = $column ? $slot["offset"] : $line["offset"] + ($crossReverse ? $line["cross_size"] - $slot["cross_size"] : 0.0);
+                $assignment = ["x" => $box["x"] + $x, "y" => $box["y"] + $y,
+                    "width" => $slot["width"], "height" => $slot["height"], "definite_width" => true,
+                    "definite_height" => $column ? $slot["definite_height"] : $slot["height"] !== null];
+                $assignment["reference_height"] = $slot["reference_height"] ?? $slot["height"];
+                $frame->set_item_layout($item, $assignment);
+                $item->set_positioner(new FlexPositioner());
+                $forced = $column && $canForce && in_array($item->get_style()->page_break_before, ["always", "left", "right"], true);
+                if ($forced) {
+                    $item->get_style()->page_break_before = "auto";
+                    $result = ["fragment" => null, "continuation" => $item, "consumed_block_size" => 0.0];
+                } else {
+                    $result = (new FlexLayoutContext($item, false, $available))->layout();
                 }
-                $this->content_height = max($this->content_height, $y + $result["consumed_block_size"]);
-            }
-            if ($result["continuation"]) {
-                if ($column) {
-                    $cut = $result["fragment"] ? $y + $result["consumed_block_size"]
-                        : max($this->content_height, min($y, $available));
-                    $slot["offset"] = max(0.0, $y - $cut);
-                }
-                $continuations[] = [$result["continuation"], $slot, $sourceOrder[$item->get_id()]];
-                if ($column) {
-                    foreach (array_slice($visits, $visit + 1) as $later) {
-                        $remaining = $slots[$later];
-                        $remaining["offset"] = max(0.0, $remaining["offset"] - $cut);
-                        $continuations[] = [$items[$later], $remaining, $sourceOrder[$items[$later]->get_id()]];
+                if ($result["fragment"]) {
+                    if (($column || $wrap) && $result["continuation"] && $item->get_reflower() instanceof Block) {
+                        $prefix = max(0.0, $item->get_reflower()->_calculate_content_height());
+                        $item->get_style()->set_used("height", $prefix);
+                        $result["consumed_block_size"] = $item->get_margin_height();
+                        if (!$column && $wrap) {
+                            $slot["cross_size"] = max(0.0, $slot["cross_size"] - $result["consumed_block_size"]);
+                            $remaining = $result["continuation"];
+                            if ($remaining instanceof \Dompdf\FrameDecorator\Flex && $remaining->get_continuation_extent() !== null) {
+                                // Nested owners can discard a boundary gap as well as a prefix.
+                                $remainingStyle = $remaining->get_style();
+                                $slot["cross_size"] = $remaining->get_continuation_extent()
+                                    + (float) $remainingStyle->length_in_pt([$remainingStyle->margin_top, $remainingStyle->margin_bottom,
+                                        $remainingStyle->padding_top, $remainingStyle->padding_bottom,
+                                        $remainingStyle->border_top_width, $remainingStyle->border_bottom_width], $width);
+                            }
+                        }
+                        if ($slot["height"] !== null) {
+                            $slot["reference_height"] = $assignment["reference_height"];
+                            $slot["height"] = max(0.0, $slot["height"] - $prefix);
+                        }
                     }
-                    $this->content_height = max($this->content_height, $cut);
+                    $lineBottom = max($lineBottom, $y + $result["consumed_block_size"]);
+                    $this->content_height = max($this->content_height, $y + $result["consumed_block_size"]);
+                }
+                if ($result["continuation"]) {
+                    if ($column) {
+                        // At an item boundary discard its separating gap, not leading free space.
+                        $cut = $result["fragment"] ? $y + $result["consumed_block_size"]
+                            : ($visit > 0 ? $y : max($lineBottom, min($y, $available)));
+                        $slot["offset"] = max(0.0, $y - $cut);
+                    }
+                    $lineContinuations[] = [$result["continuation"], $slot, $sourceOrder[$item->get_id()]];
+                    if ($column) {
+                        foreach (array_slice($visits, $visit + 1) as $later) {
+                            $remaining = $slots[$later];
+                            $remaining["offset"] = max(0.0, $remaining["offset"] - $cut);
+                            $lineContinuations[] = [$items[$later], $remaining, $sourceOrder[$items[$later]->get_id()]];
+                        }
+                        if ($result["fragment"] || $visit === 0) {
+                            $this->content_height = max($this->content_height, min($cut, $available));
+                        }
+                        break;
+                    }
+                }
+            }
+            if ($lineContinuations) {
+                if ($column) {
+                    $line["extent"] = max(0.0, $line["extent"] - $cut);
+                    $nextExtent = max($nextExtent, $line["extent"]);
+                } else {
+                    $cut = $lineBottom;
+                    $remainingCross = $wrap ? max(0.0, max(array_column(array_column($lineContinuations, 1), "cross_size"))) : 0.0;
+                    $cut = $wrap ? $line["offset"] + $line["cross_size"] - $remainingCross : $cut;
+                    $line["cross_size"] = $remainingCross;
+                    $line["offset"] = 0.0;
+                    $nextExtent = $line["cross_size"];
+                }
+                $nextLines[$lineId] = $line;
+                $continuations = array_merge($continuations, $lineContinuations);
+                if (!$column) {
+                    foreach (array_slice($lineVisits, $lineVisit + 1) as $laterLine) {
+                        $remainingLine = $lines[$laterLine];
+                        $remainingLine["offset"] = max(0.0, $remainingLine["offset"] - $cut);
+                        $nextLines[$laterLine] = $remainingLine;
+                        $nextExtent = max($nextExtent, $remainingLine["offset"] + $remainingLine["cross_size"]);
+                        foreach ($membership[$laterLine] as $later) {
+                            $continuations[] = [$items[$later], $slots[$later], $sourceOrder[$items[$later]->get_id()]];
+                        }
+                    }
                     break;
                 }
             }
@@ -333,6 +453,8 @@ class Flex extends Block
         [$usedHeight, $topMargin, $bottomMargin, $top, $bottom] = $this->_calculate_restricted_height();
         if ($column) {
             $usedHeight = $continuations ? $this->content_height : $extent;
+        } elseif ($wrap && $continuations) {
+            $usedHeight = $this->content_height;
         }
         $style->set_used("height", $usedHeight);
         $style->set_used("margin_top", $topMargin);
@@ -371,9 +493,10 @@ class Flex extends Block
                 $nextStyle->$topProp = 0.0;
             }
             $nextStyle->page_break_before = "auto";
-            if ($column) {
-                $next->set_continuation_extent(max(0.0, $extent - $cut));
+            if ($column || $wrap) {
+                $next->set_continuation_extent($nextExtent);
             }
+            $next->set_continuation_lines($nextLines);
             foreach ($continuations as [$item, $slot]) {
                 $next->append_child($item);
                 $next->set_continuation_slot($item, $slot);

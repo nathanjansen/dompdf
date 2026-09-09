@@ -60,6 +60,442 @@ class FlexTest extends TestCase
         }
     }
 
+    public static function lineGapGeometryProvider(): array
+    {
+        return [
+            "LG01 row internal gaps" => ["width:220pt;gap:20pt", ["100pt", "100pt", "100pt"], 20,
+                [[0, 0, 100, 20], [120, 0, 100, 20], [0, 40, 100, 20]], [220, 60]],
+            "LG02 exact without trailing gap" => ["width:220pt;gap:20pt", ["100pt", "100pt"], 20,
+                [[0, 0, 100, 20], [120, 0, 100, 20]], [220, 20]],
+            "LG03 oversized first" => ["width:150pt;gap:10pt", ["180pt", "40pt"], 20,
+                [[0, 0, 180, 20], [0, 30, 40, 20]], [150, 50]],
+            "LG04 zero after exact gapless line" => ["width:200pt", ["100pt", "100pt", "0pt"], 20,
+                [[0, 0, 100, 20], [100, 0, 100, 20], [200, 0, 0, 20]], [200, 20]],
+            "negative outer size stays signed" => ["width:100pt", ["10pt;margin-right:-30pt", "120pt"], 20,
+                [[0, 0, 10, 20], [-20, 0, 120, 20]], [100, 20]],
+            "zero item still pays nonzero gap" => ["width:220pt;gap:20pt", ["100pt", "100pt", "0pt"], 20,
+                [[0, 0, 100, 20], [120, 0, 100, 20], [0, 40, 0, 20]], [220, 60]],
+            "LG06 unequal row gaps" => ["width:200pt;row-gap:30pt;column-gap:20pt", ["80pt", "80pt", "80pt"], 10,
+                [[0, 0, 80, 10], [100, 0, 80, 10], [0, 40, 80, 10]], [200, 50]],
+            "LG08 definite percentage" => ["width:200pt;column-gap:10%", ["60pt", "60pt"], 20,
+                [[0, 0, 60, 20], [80, 0, 60, 20]], [200, 20]],
+            "LG10 reversed lines" => ["width:220pt;flex-wrap:wrap-reverse;gap:10pt 20pt", ["100pt", "100pt", "100pt"], 20,
+                [[0, 30, 100, 20], [120, 30, 100, 20], [0, 0, 100, 20]], [220, 50]],
+            "RTL row lines" => ["width:220pt;direction:rtl;gap:20pt", ["100pt", "100pt", "100pt"], 20,
+                [[120, 0, 100, 20], [0, 0, 100, 20], [120, 40, 100, 20]], [220, 60]],
+            "RTL row reverse and wrap reverse" => ["width:220pt;direction:rtl;flex-direction:row-reverse;flex-wrap:wrap-reverse;gap:10pt 20pt", ["100pt", "100pt", "100pt"], 20,
+                [[0, 30, 100, 20], [120, 30, 100, 20], [0, 0, 100, 20]], [220, 50]],
+            "gap percentage uses content box" => ["width:200pt;padding:10pt;border:2pt solid;column-gap:10%", ["60pt", "60pt"], 20,
+                [[12, 12, 60, 20], [92, 12, 60, 20]], [224, 44]],
+            "auto cross percentage stays cyclic" => ["width:100pt;row-gap:10%", ["100pt", "100pt"], 20,
+                [[0, 0, 100, 20], [0, 20, 100, 20]], [100, 40]],
+            "auto cross calc retains length" => ["width:100pt;row-gap:calc(5pt + 10%)", ["100pt", "100pt"], 20,
+                [[0, 0, 100, 20], [0, 25, 100, 20]], [100, 45]]
+        ];
+    }
+
+    /** @dataProvider lineGapGeometryProvider */
+    #[\PHPUnit\Framework\Attributes\DataProvider('lineGapGeometryProvider')]
+    public function testLineMembershipGapsAndPhysicalCrossExtent(string $css, array $widths, float $height, array $expected, array $container): void
+    {
+        $html = '<div data-test="container" style="display:flex;flex-wrap:wrap;align-items:flex-start;align-content:flex-start;' . $css . '">';
+        foreach ($widths as $index => $width) {
+            $html .= '<div data-test="item' . $index . '" style="flex:none;min-width:0;width:' . $width . ';height:' . $height . 'pt"></div>';
+        }
+        $result = $this->layout($html . '</div>', '', 1);
+        $this->assertSame(1, $result["pages"]);
+        foreach ($expected as $index => $box) {
+            $this->assertBox($result, "item" . $index, $box);
+        }
+        $this->assertBox($result, "container", [0, 0, $container[0], $container[1]]);
+    }
+
+    public static function columnGapGeometryProvider(): array
+    {
+        return [
+            "LG07 column unequal gaps" => ["height:100pt;gap:10pt 30pt", 30, 3, [[0, 0], [0, 40], [70, 0]], 100],
+            "LG11 auto column" => ["flex-wrap:nowrap;gap:10pt 30pt", 30, 3, [[0, 0], [0, 40], [0, 80]], 110],
+            "LG12 auto column cannot wrap to page height" => ["gap:10pt 30pt", 30, 3, [[0, 0], [0, 40], [0, 80]], 110],
+            "definite column percentage" => ["height:100pt;row-gap:10%", 30, 3, [[0, 0], [0, 40], [40, 0]], 100],
+            "cyclic column percentage" => ["row-gap:10%", 20, 2, [[0, 0], [0, 20]], 40],
+            "cyclic column calc" => ["row-gap:calc(5pt + 10%)", 20, 2, [[0, 0], [0, 25]], 45],
+            "definite column calc" => ["height:100pt;row-gap:calc(5pt + 10%)", 20, 2, [[0, 0], [0, 35]], 100],
+            "column reversed cross lines" => ["height:100pt;flex-wrap:wrap-reverse;gap:10pt 30pt", 30, 3, [[100, 0], [100, 40], [30, 0]], 100],
+            "column RTL reversed both axes" => ["height:100pt;direction:rtl;flex-direction:column-reverse;flex-wrap:wrap-reverse;gap:10pt 30pt", 30, 3,
+                [[0, 70], [0, 30], [70, 70]], 100]
+        ];
+    }
+
+    /** @dataProvider columnGapGeometryProvider */
+    #[\PHPUnit\Framework\Attributes\DataProvider('columnGapGeometryProvider')]
+    public function testColumnLineMembershipAndPhysicalGapMapping(string $css, float $height, int $count, array $positions, float $containerHeight): void
+    {
+        $html = '<div data-test="container" style="display:flex;flex-flow:column wrap;width:140pt;align-items:flex-start;align-content:flex-start;' . $css . '">';
+        for ($index = 0; $index < $count; $index++) {
+            $html .= '<div data-test="item' . $index . '" style="flex:none;width:40pt;height:' . $height . 'pt"></div>';
+        }
+        $result = $this->layout($html . '</div>', '', 1);
+        foreach ($positions as $index => $position) {
+            $this->assertBox($result, "item" . $index, [$position[0], $position[1], 40, $height]);
+        }
+        $this->assertBox($result, "container", [0, 0, 140, $containerHeight]);
+    }
+
+    public function testWrappingUsesOuterHypotheticalSizesThenFlexesEachLine(): void
+    {
+        $grow = $this->layout('<div style="display:flex;flex-wrap:wrap;width:220pt;gap:20pt;align-items:flex-start;align-content:flex-start">'
+            . '<div data-test="A" class="item"></div><div data-test="B" class="item"></div><div data-test="C" class="item"></div></div>',
+            '.item {flex:1 1 100pt;min-width:0;height:20pt}');
+        $this->assertBox($grow, "A", [0, 0, 100, 20]);
+        $this->assertBox($grow, "B", [120, 0, 100, 20]);
+        $this->assertBox($grow, "C", [0, 40, 220, 20]);
+        $shrink = $this->layout('<div style="display:flex;flex-wrap:wrap;width:100pt;gap:10pt;align-items:flex-start;align-content:flex-start">'
+            . '<div data-test="A" style="flex:0 1 120pt;min-width:0;height:20pt"></div>'
+            . '<div data-test="B" style="flex:0 1 80pt;min-width:0;height:20pt"></div></div>');
+        $this->assertBox($shrink, "A", [0, 0, 100, 20]);
+        $this->assertBox($shrink, "B", [0, 30, 80, 20]);
+        $negative = $this->layout('<div data-test="container" style="display:flex;flex-wrap:wrap;width:100pt;align-items:flex-start;align-content:flex-start">'
+            . '<div data-test="A" style="flex:none;width:60pt;height:20pt;margin-right:-20pt"></div>'
+            . '<div data-test="B" style="flex:none;width:60pt;height:20pt"></div></div>');
+        $this->assertBox($negative, "A", [0, 0, 60, 20]);
+        $this->assertBox($negative, "B", [40, 0, 60, 20]);
+        $this->assertBox($negative, "container", [0, 0, 100, 20]);
+    }
+
+    public function testWrappedRowsPreserveAllPhysicalLinesAndSourceOrderAcrossPages(): void
+    {
+        foreach (["wrap" => ["ABCD", "EF"], "wrap-reverse" => ["EFCD", "AB"]] as $wrap => $pages) {
+            $html = '<div data-test="container" style="display:flex;flex-wrap:' . $wrap . ';width:200pt;align-items:flex-start;align-content:flex-start">';
+            foreach (str_split("ABCDEF") as $letter) {
+                $html .= '<div data-test="' . $letter . '" style="flex:none;width:100pt;height:40pt">' . $letter . '</div>';
+            }
+            $result = $this->layout($html . '</div><div data-test="after">AFTER</div>', '@page {size:200pt 100pt}', 2);
+            $this->assertSame(2, $result["pages"]);
+            foreach ($pages as $pageIndex => $letters) {
+                foreach (str_split($letters) as $index => $letter) {
+                    $this->assertCount(1, $result["boxes"][$letter]);
+                    $this->assertSame($pageIndex + 1, $result["boxes"][$letter][0]["page"]);
+                    $this->assertBox($result, $letter, [($index % 2) * 100, intdiv($index, 2) * 40, 100, 40]);
+                }
+            }
+            $remaining = str_split($pages[1]);
+            sort($remaining);
+            $this->assertSame($remaining, $result["boxes"]["container"][1]["source"]);
+            $this->assertBox($result, "container", [0, 0, 200, 80]);
+            $this->assertBox($result, "container", [0, 0, 200, 40], 1);
+            $this->assertBox($result, "after", [0, 40]);
+            $this->assertSame(2, $result["boxes"]["after"][0]["page"]);
+        }
+    }
+
+    public function testWrappedRowContinuesLongPeerBeforeUntouchedLaterLine(): void
+    {
+        $html = '<div data-test="container" style="display:flex;flex-wrap:wrap;width:200pt;row-gap:10pt;align-items:flex-start;align-content:flex-start">'
+            . '<div data-test="A" style="flex:none;width:100pt">';
+        for ($i = 1; $i <= 8; $i++) {
+            $html .= '<div style="height:20pt;page-break-inside:avoid">A' . $i . '</div>';
+        }
+        $result = $this->layout($html . '</div><div data-test="B" style="flex:none;width:100pt;height:20pt">B</div>'
+            . '<div data-test="C" style="flex:none;width:100pt;height:20pt">C</div></div><div data-test="after" style="height:10pt;line-height:10pt">AFTER</div>',
+            '@page {size:200pt 100pt}', 2);
+        $this->assertSame(2, $result["pages"]);
+        $this->assertSame("A1A2A3A4A5B", implode("", array_column($result["text"][1], 0)));
+        $this->assertSame("A6A7A8CAFTER", implode("", array_column($result["text"][2], 0)));
+        $this->assertBox($result, "B", [100, 0, 100, 20]);
+        $this->assertCount(1, $result["boxes"]["B"]);
+        $this->assertBox($result, "C", [0, 70, 100, 20]);
+        $this->assertSame(2, $result["boxes"]["C"][0]["page"]);
+        $this->assertBox($result, "after", [0, 90]);
+    }
+
+    public function testFragmentBoundaryDiscardsOnlyTheSeparatingGap(): void
+    {
+        foreach (["row", "column"] as $direction) {
+            $result = $this->layout('<div data-test="container" style="display:flex;flex-direction:' . $direction . ';flex-wrap:wrap;width:100pt;row-gap:20pt;align-items:flex-start;align-content:flex-start">'
+                . '<div data-test="A" style="flex:none;width:100pt;height:60pt">A</div>'
+                . '<div data-test="B" style="flex:none;width:100pt;height:60pt">B</div></div><div data-test="after">AFTER</div>',
+                '@page {size:200pt 100pt}', 2);
+            $this->assertSame(2, $result["pages"]);
+            $this->assertSame("A", implode("", array_column($result["text"][1], 0)));
+            $this->assertSame("BAFTER", implode("", array_column($result["text"][2], 0)));
+            $this->assertBox($result, "B", [0, 0, 100, 60]);
+            $this->assertBox($result, "container", [0, 0, 100, 60]);
+            $this->assertBox($result, "container", [0, 0, 100, 60], 1);
+            $this->assertBox($result, "after", [0, 60]);
+        }
+    }
+
+    public function testWrappedColumnsKeepIndependentForcedRemaindersAndTrailingExtent(): void
+    {
+        $result = $this->layout('<div data-test="container" style="display:flex;flex-flow:column wrap;width:200pt;height:80pt;align-items:flex-start;align-content:flex-start">'
+            . '<div data-test="A" style="flex:none;width:100pt;height:60pt"><div style="height:20pt">A1</div>'
+            . '<div style="height:20pt;page-break-before:always">A2</div></div>'
+            . '<div data-test="B" style="flex:none;width:100pt;height:60pt">B</div></div><div data-test="after">AFTER</div>',
+            '@page {size:200pt 100pt}', 2);
+        $this->assertSame(2, $result["pages"]);
+        $this->assertSame("A1B", implode("", array_column($result["text"][1], 0)));
+        $this->assertSame("A2AFTER", implode("", array_column($result["text"][2], 0)));
+        $this->assertBox($result, "B", [100, 0, 100, 60]);
+        $this->assertCount(1, $result["boxes"]["B"]);
+        $this->assertBox($result, "A", [0, 0, 100, 40], 1);
+        $this->assertBox($result, "container", [0, 0, 200, 60], 1);
+        $this->assertBox($result, "after", [0, 60]);
+    }
+
+    public function testNestedWrappedActualItemKeepsItsOriginalSlotAndAllLaterLines(): void
+    {
+        $html = '<div style="display:flex;width:300pt"><div data-test="S" style="flex:none;width:100pt;height:20pt">S</div>'
+            . '<div data-test="inner" style="display:flex;flex:none;width:200pt;flex-wrap:wrap;align-items:flex-start;align-content:flex-start">';
+        foreach (str_split("ABCDEF") as $letter) {
+            $html .= '<div data-test="' . $letter . '" style="flex:none;width:100pt;height:40pt">' . $letter . '</div>';
+        }
+        $result = $this->layout($html . '</div></div><div data-test="after">AFTER</div>', '@page {size:300pt 100pt}', 2);
+        $this->assertSame(2, $result["pages"]);
+        $this->assertSame("SABCD", implode("", array_column($result["text"][1], 0)));
+        $this->assertSame("EFAFTER", implode("", array_column($result["text"][2], 0)));
+        $this->assertBox($result, "S", [0, 0, 100, 20]);
+        $this->assertCount(1, $result["boxes"]["S"]);
+        $this->assertBox($result, "inner", [100, 0, 200, 40], 1);
+        $this->assertBox($result, "E", [100, 0, 100, 40]);
+        $this->assertBox($result, "F", [200, 0, 100, 40]);
+        $this->assertBox($result, "after", [0, 40]);
+    }
+
+    public function testWrappedRowContinuationKeepsOriginalPercentageHeightReference(): void
+    {
+        foreach (["160pt", "100%"] as $height) {
+            $html = '<div style="display:flex;flex-wrap:wrap;width:200pt;height:160pt;align-items:flex-start;align-content:flex-start">'
+                . '<div data-test="A" style="flex:none;width:100pt;height:' . $height . '">';
+            for ($i = 1; $i <= 5; $i++) {
+                $html .= '<div style="height:20pt;page-break-inside:avoid">A' . $i . '</div>';
+            }
+            $html .= '<div data-test="percent" style="height:25%;page-break-inside:avoid">P</div></div>'
+                . '<div style="flex:none;width:100pt;height:20pt">B</div></div><div data-test="after">AFTER</div>';
+            $result = $this->layout($html, '@page {size:200pt 100pt}', 2);
+            $this->assertSame(2, $result["pages"]);
+            $this->assertBox($result, "percent", [0, 0, 100, 40]);
+            $this->assertSame(2, $result["boxes"]["percent"][0]["page"]);
+            $this->assertBox($result, "A", [0, 0, 100, 60], 1);
+        }
+    }
+
+    public function testNativeTextAtFlexedWidthDeterminesLaterLineCrossPosition(): void
+    {
+        $result = $this->layout('<div data-test="container" style="display:flex;flex-wrap:wrap;width:200pt;gap:10pt 20pt;align-items:flex-start;align-content:flex-start">'
+            . '<div data-test="A" class="item">MMMM MMMM MMMM</div>'
+            . '<div data-test="B" class="item" style="height:20pt"></div><div data-test="C" class="item" style="height:20pt"></div></div>',
+            '.item {flex:1 1 60pt;min-width:0}', 1);
+        // Times-Roman's native 20pt line-height occupies 19.8pt per line.
+        $this->assertBox($result, "A", [0, 0, 90, 39.6]);
+        $this->assertBox($result, "B", [110, 0, 90, 20]);
+        $this->assertBox($result, "C", [0, 49.6, 200, 20]);
+        $this->assertBox($result, "container", [0, 0, 200, 69.6]);
+        $this->assertSame(["MMMM MMMM", "MMMM"], array_column($result["text"][1], 0));
+    }
+
+    public function testLineCrossExtentIncludesAsymmetricOuterEdges(): void
+    {
+        $result = $this->layout('<div data-test="container" style="display:flex;flex-wrap:wrap;width:220pt;gap:7pt 20pt;align-items:flex-start;align-content:flex-start">'
+            . '<div data-test="A" style="flex:none;width:60pt;height:20pt;padding:4pt 10pt 6pt;border:1pt solid;margin:3pt 5pt 5pt"></div>'
+            . '<div data-test="B" style="flex:none;width:100pt;height:20pt"></div><div data-test="C" style="flex:none;width:100pt;height:20pt"></div></div>');
+        $this->assertBox($result, "A", [5, 3, 82, 32]);
+        $this->assertBox($result, "B", [112, 0, 100, 20]);
+        $this->assertBox($result, "C", [0, 47, 100, 20]);
+        $this->assertBox($result, "container", [0, 0, 220, 67]);
+    }
+
+    public function testWrappedNativeImageCrossSizeUsesItsFinalAssignedWidth(): void
+    {
+        $result = $this->layout('<div data-test="container" style="display:flex;flex-wrap:wrap;width:150pt;gap:10pt;align-items:flex-start;align-content:flex-start">'
+            . '<img data-test="A" class="item" src="' . $this->image() . '"><img data-test="B" class="item" src="' . $this->image() . '"></div>',
+            '.item {flex:none;width:100pt;min-width:0}', 1);
+        $this->assertBox($result, "A", [0, 0, 100, 50]);
+        $this->assertBox($result, "B", [0, 60, 100, 50]);
+        $this->assertBox($result, "container", [0, 0, 150, 110]);
+    }
+
+    public function testWrapReverseMapsFlexStartWithinUnequalCrossSizeLine(): void
+    {
+        $result = $this->layout('<div data-test="container" style="display:flex;flex-wrap:wrap-reverse;width:220pt;gap:10pt 20pt;align-items:flex-start;align-content:flex-start">'
+            . '<div data-test="A" style="flex:none;width:100pt;height:10pt"></div>'
+            . '<div data-test="B" style="flex:none;width:100pt;height:20pt"></div>'
+            . '<div data-test="C" style="flex:none;width:100pt;height:30pt"></div></div>');
+        $this->assertBox($result, "A", [0, 50, 100, 10]);
+        $this->assertBox($result, "B", [120, 40, 100, 20]);
+        $this->assertBox($result, "C", [0, 0, 100, 30]);
+        $this->assertBox($result, "container", [0, 0, 220, 60]);
+    }
+
+    public function testContinuationRetainsOriginalPercentageGapAndItemHeightReference(): void
+    {
+        $html = '<div style="display:flex;flex-flow:column wrap;width:200pt;height:200pt;row-gap:10%;align-items:flex-start;align-content:flex-start">'
+            . '<div data-test="A" style="flex:none;width:100pt;height:160pt">';
+        for ($i = 1; $i <= 5; $i++) {
+            $html .= '<div style="height:20pt;page-break-inside:avoid">A' . $i . '</div>';
+        }
+        $result = $this->layout($html . '<div data-test="P" style="height:25%;page-break-inside:avoid">P</div></div>'
+            . '<div data-test="B" style="flex:none;width:100pt;height:20pt">B</div></div><div data-test="after">AFTER</div>',
+            '@page {size:200pt 100pt}', 3);
+        $this->assertSame(3, $result["pages"]);
+        $this->assertBox($result, "P", [0, 0, 100, 40]);
+        $this->assertBox($result, "A", [0, 0, 100, 60], 1);
+        $this->assertBox($result, "B", [0, 80, 100, 20]);
+        $this->assertSame(2, $result["boxes"]["B"][0]["page"]);
+        $this->assertSame("PB", implode("", array_column($result["text"][2], 0)));
+        $this->assertSame("AFTER", implode("", array_column($result["text"][3], 0)));
+    }
+
+    public function testAutoColumnMaxHeightLimitsLinesWithoutResolvingCyclicPercentages(): void
+    {
+        $result = $this->layout('<div data-test="container" style="display:flex;flex-flow:column wrap;width:200pt;max-height:100pt;row-gap:10%;align-items:flex-start;align-content:flex-start">'
+            . '<div data-test="A" style="flex:none;width:100pt;height:40pt"></div>'
+            . '<div data-test="B" style="flex:none;width:100pt;height:40pt"></div>'
+            . '<div data-test="C" style="flex:none;width:100pt;height:40pt"><div data-test="P" style="height:50%"></div></div></div>');
+        $this->assertBox($result, "A", [0, 0, 100, 40]);
+        $this->assertBox($result, "B", [0, 40, 100, 40]);
+        $this->assertBox($result, "C", [100, 0, 100, 40]);
+        $this->assertBox($result, "P", [100, 0, 100, 20]);
+        $this->assertBox($result, "container", [0, 0, 200, 100]);
+    }
+
+    public function testWholeDeferredPeerKeepsItsFullHeightBeforeLaterWrappedLine(): void
+    {
+        $result = $this->layout('<div style="height:40pt">LEAD</div><div data-test="container" style="display:flex;flex-wrap:wrap;width:200pt;row-gap:10pt;align-items:flex-start;align-content:flex-start">'
+            . '<div data-test="A" style="flex:none;width:100pt;height:20pt;page-break-inside:avoid">A</div>'
+            . '<div data-test="B" style="flex:none;width:100pt;height:80pt;page-break-inside:avoid">B</div>'
+            . '<div data-test="C" style="flex:none;width:100pt;height:20pt;page-break-inside:avoid">C</div></div><div data-test="after">AFTER</div>',
+            '@page {size:200pt 100pt}', 3);
+        $this->assertSame(3, $result["pages"]);
+        $this->assertSame("LEADA", implode("", array_column($result["text"][1], 0)));
+        $this->assertSame("B", implode("", array_column($result["text"][2], 0)));
+        $this->assertSame("CAFTER", implode("", array_column($result["text"][3], 0)));
+        $this->assertBox($result, "B", [100, 0, 100, 80]);
+        $this->assertBox($result, "C", [0, 0, 100, 20]);
+        $this->assertSame(3, $result["boxes"]["C"][0]["page"]);
+        $this->assertBox($result, "after", [0, 20]);
+    }
+
+    public function testDifferentPeerPrefixesLeaveTheLongestActualRemainderBeforeLaterLine(): void
+    {
+        $html = '<div style="display:flex;flex-wrap:wrap;width:200pt;row-gap:10pt;align-items:flex-start;align-content:flex-start">';
+        foreach (["A", "B"] as $letter) {
+            $html .= '<div style="flex:none;width:100pt">';
+            for ($i = 1; $i <= 8; $i++) {
+                $html .= '<div style="height:20pt;page-break-inside:avoid;' . ($letter === "B" && $i === 2 ? 'page-break-before:always' : '') . '">' . $letter . $i . '</div>';
+            }
+            $html .= '</div>';
+        }
+        $result = $this->layout($html . '<div data-test="C" style="flex:none;width:100pt;height:20pt">C</div></div><div data-test="after">AFTER</div>',
+            '@page {size:200pt 100pt}', 3);
+        $this->assertSame(3, $result["pages"]);
+        $this->assertSame("A1A2A3A4A5B1", implode("", array_column($result["text"][1], 0)));
+        $this->assertSame("A6A7A8B2B3B4B5B6", implode("", array_column($result["text"][2], 0)));
+        $this->assertSame("B7B8CAFTER", implode("", array_column($result["text"][3], 0)));
+        $this->assertBox($result, "C", [0, 50, 100, 20]);
+        $this->assertSame(3, $result["boxes"]["C"][0]["page"]);
+        $this->assertBox($result, "after", [0, 70]);
+    }
+
+    public function testReversedWrappedLinesKeepPreparedGeneratedSourceCounters(): void
+    {
+        $html = '<div data-test="container" style="display:flex;flex-wrap:wrap-reverse;width:200pt;align-items:flex-start;align-content:flex-start">';
+        foreach (str_split("ABCDEFGH") as $letter) {
+            $html .= '<div data-test="' . $letter . '" class="counter" style="flex:none;width:100pt;height:40pt">' . $letter . '</div>';
+        }
+        $result = $this->layout($html . '</div><div data-test="after" class="after">AFTER</div>',
+            '@page {size:200pt 100pt}body {counter-reset:n}.counter {counter-increment:n}.counter:before,.after:before {content:counter(n)}', 2);
+        $this->assertSame(2, $result["pages"]);
+        $this->assertSame("5E6F7G8H", implode("", array_column($result["text"][1], 0)));
+        $this->assertSame("1A2B3C4D8AFTER", implode("", array_column($result["text"][2], 0)));
+        $this->assertSame(["A", "B", "C", "D"], $result["boxes"]["container"][1]["source"]);
+        $this->assertBox($result, "A", [0, 40, 100, 40]);
+        $this->assertBox($result, "C", [0, 0, 100, 40]);
+        $this->assertBox($result, "after", [0, 80]);
+    }
+
+    public static function nestedGapReferenceProvider(): array
+    {
+        return [
+            "numeric indefinite" => ["auto", "10%", 40, 20],
+            "numeric indefinite calc" => ["auto", "calc(5pt + 10%)", 45, 25],
+            "definite basis control" => ["40pt", "10%", 40, 24]
+        ];
+    }
+
+    /** @dataProvider nestedGapReferenceProvider */
+    #[\PHPUnit\Framework\Attributes\DataProvider('nestedGapReferenceProvider')]
+    public function testNestedAssignedHeightDoesNotInventGapDefiniteness(string $basis, string $gap, float $height, float $secondY): void
+    {
+        $result = $this->layout('<div data-test="outer" style="display:flex;flex-direction:column;width:100pt;align-items:flex-start">'
+            . '<div data-test="inner" style="display:flex;flex:0 0 ' . $basis . ';flex-wrap:wrap;width:100pt;row-gap:' . $gap . ';align-items:flex-start;align-content:flex-start">'
+            . '<div data-test="A" style="flex:none;width:100pt;height:20pt">A</div>'
+            . '<div data-test="B" style="flex:none;width:100pt;height:20pt">B</div></div></div><div data-test="after">AFTER</div>', '', 1);
+        $this->assertBox($result, "outer", [0, 0, 100, $height]);
+        $this->assertBox($result, "inner", [0, 0, 100, $height]);
+        $this->assertBox($result, "B", [0, $secondY, 100, 20]);
+        $this->assertBox($result, "after", [0, $height]);
+        $this->assertSame(["A", "B", "AFTER"], array_column($result["text"][1], 0));
+    }
+
+    public function testOuterLineUsesPreparedNestedRemainderIncludingRemainingEdges(): void
+    {
+        foreach (["" => [40, 40, 50, 70], "margin-bottom:3pt;padding-bottom:4pt;border-bottom:2pt solid" => [40, 46, 59, 79]] as $edges => $expected) {
+            $html = '<div style="display:flex;flex-wrap:wrap;width:300pt;row-gap:10pt;align-items:flex-start;align-content:flex-start">'
+                . '<div style="flex:none;width:100pt;height:20pt">S</div>'
+                . '<div data-test="inner" style="display:flex;flex:none;flex-wrap:wrap;width:200pt;row-gap:10pt;align-items:flex-start;align-content:flex-start;' . $edges . '">';
+            foreach (str_split("ABCDEF") as $letter) {
+                $html .= '<div style="flex:none;width:100pt;height:40pt">' . $letter . '</div>';
+            }
+            $result = $this->layout($html . '</div><div data-test="T" style="flex:none;width:100pt;height:20pt">T</div></div>'
+                . '<div data-test="after" style="height:10pt;line-height:10pt">AFTER</div>', '@page {size:300pt 100pt}', 2);
+            $this->assertSame(2, $result["pages"]);
+            $this->assertSame("SABCD", implode("", array_column($result["text"][1], 0)));
+            $this->assertSame("EFTAFTER", implode("", array_column($result["text"][2], 0)));
+            $this->assertEqualsWithDelta($expected[0], $result["boxes"]["inner"][1]["content"][3], 0.01);
+            $this->assertBox($result, "inner", [100, 0, 200, $expected[1]], 1);
+            $this->assertBox($result, "T", [0, $expected[2], 100, 20]);
+            $this->assertBox($result, "after", [0, $expected[3]]);
+        }
+    }
+
+    public function testRemainingLineCrossSizeFloorsSignedNestedOuterSizeAtZero(): void
+    {
+        $html = '<div style="display:flex;flex-wrap:wrap;width:300pt;row-gap:10pt;align-items:flex-start;align-content:flex-start">'
+            . '<div style="flex:none;width:100pt;height:20pt">S</div>'
+            . '<div data-test="inner" style="display:flex;flex:none;flex-wrap:wrap;width:200pt;row-gap:10pt;margin-bottom:-100pt;align-items:flex-start;align-content:flex-start">';
+        foreach (str_split("ABCDEF") as $letter) {
+            $content = $letter === "C" ? '<div style="height:1pt"></div><div style="height:39pt;page-break-before:always">C</div>' : $letter;
+            $html .= '<div style="flex:none;width:100pt;height:40pt">' . $content . '</div>';
+        }
+        $result = $this->layout($html . '</div><div data-test="T" style="flex:none;width:100pt;height:20pt">T</div></div>'
+            . '<div data-test="after" style="height:10pt;line-height:10pt">AFTER</div>', '@page {size:300pt 100pt}', 2);
+        $this->assertSame(2, $result["pages"]);
+        $this->assertSame("SABD", implode("", array_column($result["text"][1], 0)));
+        $this->assertSame("CEFTAFTER", implode("", array_column($result["text"][2], 0)));
+        $this->assertEqualsWithDelta(89, $result["boxes"]["inner"][1]["content"][3], 0.01);
+        $this->assertBox($result, "inner", [100, 0, 200, 89], 1);
+        $this->assertSame(2, $result["boxes"]["T"][0]["page"]);
+        $this->assertBox($result, "T", [0, 10, 100, 20]);
+        $this->assertSame(2, $result["boxes"]["after"][0]["page"]);
+        $this->assertBox($result, "after", [0, 30]);
+    }
+
+    public function testNestedNowrapRemainderDoesNotClaimUnknownExtentIsZero(): void
+    {
+        $html = '<div style="display:flex;flex-wrap:wrap;width:300pt;row-gap:10pt;align-items:flex-start;align-content:flex-start">'
+            . '<div style="flex:none;width:100pt;height:20pt">S</div><div style="display:flex;flex:none;width:200pt"><div style="flex:none;width:200pt">';
+        for ($i = 1; $i <= 8; $i++) {
+            $html .= '<div style="height:20pt;page-break-inside:avoid">A' . $i . '</div>';
+        }
+        $result = $this->layout($html . '</div></div><div data-test="T" style="flex:none;width:100pt;height:20pt">T</div></div>'
+            . '<div data-test="after" style="height:10pt;line-height:10pt">AFTER</div>', '@page {size:300pt 100pt}', 2);
+        $this->assertSame("SA1A2A3A4A5", implode("", array_column($result["text"][1], 0)));
+        $this->assertSame("A6A7A8TAFTER", implode("", array_column($result["text"][2], 0)));
+        $this->assertBox($result, "T", [0, 70, 100, 20]);
+        $this->assertBox($result, "after", [0, 90]);
+        $this->assertSame(2, $result["pages"]);
+    }
+
     public function testPreparedCountersSurviveWholeItemDeferralWithoutReplay(): void
     {
         $result = $this->layout('<div style="height:60pt">LEAD</div><div style="display:flex;width:200pt">'

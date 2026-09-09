@@ -43,6 +43,33 @@ class FlexLayoutContextTest extends TestCase
         });
     }
 
+    public function testRepeatedWrappedMeasurementKeepsPreparedCountersAndLiveCallbacks(): void
+    {
+        $html = '<section id="item"><div style="display:flex;flex-wrap:wrap;width:200pt;row-gap:10pt;align-items:flex-start;align-content:flex-start">';
+        foreach (str_split("ABCDEF") as $letter) {
+            $html .= '<div class="counter" style="flex:none;width:100pt;height:40pt">' . $letter . '</div>';
+        }
+        $dompdf = $this->document($html . '</div></section>',
+            'body {counter-reset:n}.counter {counter-increment:n}.counter:before {content:counter(n)}');
+        $callbacks = 0;
+        $this->inspectEntry($dompdf, function ($item) use (&$callbacks) {
+            $before = $this->snapshot($item->get_root());
+            $count = $callbacks;
+            $context = new FlexLayoutContext($item, true, null);
+            foreach ([1, 2] as $repeat) {
+                $result = $context->layout();
+                $this->assertNull($result["continuation"]);
+                $this->assertEquals(140, $result["consumed_block_size"]);
+                $this->assertSame("1A2B3C4D5E6F", implode("", $this->content($result["fragment"])[0]));
+                $this->assertSame($before, $this->snapshot($item->get_root()));
+                $this->assertSame($count, $callbacks);
+            }
+        }, function () use (&$callbacks) {
+            $callbacks++;
+        });
+        $this->assertGreaterThan(0, $callbacks);
+    }
+
     public function testPreparedListCopiesKeepOnlyActualMarkerAndContent(): void
     {
         $dompdf = $this->document('<div style="display:flex;width:200pt"><section id="item" style="width:100pt;flex:none"><ol><li>ONE</li></ol></section></div>');
