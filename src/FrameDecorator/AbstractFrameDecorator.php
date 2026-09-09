@@ -98,6 +98,9 @@ abstract class AbstractFrameDecorator extends Frame
      */
     public $content_set = false;
 
+    /** Logical content/effects committed in source order, independent of reflow. */
+    public $content_prepared = false;
+
     /**
      * Whether the frame has been split
      *
@@ -175,6 +178,16 @@ abstract class AbstractFrameDecorator extends Frame
 
         $deco = Factory::decorate_frame($frame, $this->_dompdf, $this->_root);
 
+        if ($this->content_prepared) {
+            $deco->content_prepared = true;
+            $deco->_counters = $this->_counters;
+            // Factory inserts a new list marker; physical copies keep only
+            // the actual marker/suffix moved or copied from the source.
+            if (($marker = $deco->get_first_child()) && $marker->get_node()->nodeName === "bullet") {
+                $deco->remove_child($marker);
+            }
+        }
+
         if ($this instanceof Text) {
             $deco->trailingWs = $this->trailingWs;
         }
@@ -189,6 +202,13 @@ abstract class AbstractFrameDecorator extends Frame
      */
     function deep_copy()
     {
+        if ($this->content_prepared) {
+            $copy = $this->copy($this->_frame->get_node()->cloneNode());
+            foreach ($this->get_children() as $child) {
+                $copy->append_child($child->deep_copy());
+            }
+            return $copy;
+        }
         $node = $this->_frame->get_node()->cloneNode();
         $frame = new Frame($node);
         $style = clone $this->_frame->get_style();
@@ -240,11 +260,13 @@ abstract class AbstractFrameDecorator extends Frame
     {
         $this->_frame->reset();
         $this->_reflower->reset();
-        $this->reset_generated_content();
-        $this->revert_counter_increment();
+        if (!$this->content_prepared) {
+            $this->reset_generated_content();
+            $this->revert_counter_increment();
+            $this->_counters = [];
+        }
 
         $this->content_set = false;
-        $this->_counters = [];
 
         // clear parent lookup caches
         $this->_cached_parent = null;
@@ -283,7 +305,7 @@ abstract class AbstractFrameDecorator extends Frame
      */
     protected function revert_counter_increment(): void
     {
-        if ($this->content_set
+        if (!$this->content_prepared && $this->content_set
             && $this->get_node()->nodeName !== "body"
             && ($decrement = $this->get_style()->counter_increment) !== "none"
         ) {
@@ -630,6 +652,22 @@ abstract class AbstractFrameDecorator extends Frame
         return $this->_root;
     }
 
+    /** Horizontal baseline offset from this frame's position; null means absent. */
+    public function get_baseline(bool $last = false): ?float
+    {
+        return null;
+    }
+
+    public function get_flex_layout(): ?array
+    {
+        $context = $this->_root ? $this->_root->get_flex_context() : null;
+        if ($context && $context->get_item() === $this && $context->get_item_layout() !== null) {
+            return $context->get_item_layout();
+        }
+        $parent = $this->get_parent();
+        return $parent instanceof Flex ? $parent->get_item_layout($this) : null;
+    }
+
     /**
      * @return Block
      */
@@ -693,7 +731,14 @@ abstract class AbstractFrameDecorator extends Frame
      */
     public function split(?Frame $child = null, bool $page_break = false, bool $forced = false): void
     {
+        $context = $page_break ? $this->_root->get_flex_context() : null;
+        $boundary = $context && $context->get_item() === $this;
+        $local = $context && $context->contains($this);
         if (is_null($child)) {
+            if ($boundary) {
+                $context->defer();
+                return;
+            }
             $this->get_parent()->split($this, $page_break, $forced);
             return;
         }
@@ -702,7 +747,9 @@ abstract class AbstractFrameDecorator extends Frame
             throw new Exception("Unable to split: frame is not a child of this one.");
         }
 
-        $this->revert_counter_increment();
+        if (!$local) {
+            $this->revert_counter_increment();
+        }
 
         $node = $this->_frame->get_node();
         $split = $this->copy($node->cloneNode());
@@ -730,6 +777,11 @@ abstract class AbstractFrameDecorator extends Frame
 
         $split_style->text_indent = 0.0;
         $split_style->counter_reset = "none";
+        if ($local) {
+            // This wrapper remains on the current page; its continuation is
+            // the same logical element and must not increment counters again.
+            $split_style->counter_increment = "none";
+        }
 
         $this->is_split = true;
         $split->is_split_off = true;
@@ -763,7 +815,11 @@ abstract class AbstractFrameDecorator extends Frame
             $split->append_child($frame);
         }
 
-        $this->get_parent()->split($split, $page_break, $forced);
+        if ($boundary) {
+            $context->capture_continuation($split, $forced);
+        } else {
+            $this->get_parent()->split($split, $page_break, $forced);
+        }
 
         // Preserve the current counter values. This must be done after the
         // parent split, as counters get reset on frame reset

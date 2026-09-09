@@ -70,6 +70,14 @@ class Factory
 
         switch ($display) {
 
+            case "flex":
+            case "inline-flex":
+                $positioner = $display === "flex" ? "Block" : "Inline";
+                $decorator = "Flex";
+                $reflower = "Flex";
+                self::normalize_flex_children($frame);
+                break;
+
             case "block":
                 $positioner = "Block";
                 $decorator = "Block";
@@ -242,6 +250,49 @@ class Factory
         }
 
         return $deco;
+    }
+
+    /** Normalize raw children once, before the ordinary preorder decoration pass. */
+    private static function normalize_flex_children(Frame $frame): void
+    {
+        $textRun = [];
+        $wrapText = function () use ($frame, &$textRun) {
+            if (!$textRun) {
+                return;
+            }
+            $text = "";
+            foreach ($textRun as $child) {
+                $text .= $child->get_node()->nodeValue;
+            }
+            if (trim($text, " \t\r\n\f") !== "") {
+                $node = $frame->get_node()->ownerDocument->createElement("dompdf_flex_item");
+                $wrapper = new Frame($node);
+                $style = $frame->get_style()->get_stylesheet()->create_style();
+                $style->inherit($frame->get_style());
+                $style->set_prop("display", "block");
+                $wrapper->set_style($style);
+                $frame->insert_child_before($wrapper, $textRun[0]);
+                foreach ($textRun as $child) {
+                    $wrapper->append_child($child);
+                }
+            } else {
+                foreach ($textRun as $child) {
+                    $frame->remove_child($child);
+                }
+            }
+            $textRun = [];
+        };
+        foreach (iterator_to_array($frame->get_children()) as $child) {
+            if ($child->is_text_node()) {
+                $textRun[] = $child;
+            } else {
+                $wrapText();
+                if (!$child->get_style()->is_absolute()) {
+                    $child->get_style()->blockify_flex_item();
+                }
+            }
+        }
+        $wrapText();
     }
 
     /**

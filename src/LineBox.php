@@ -59,6 +59,9 @@ class LineBox
      */
     public $h = 0.0;
 
+    /** Local alignment baseline, only for native lines containing inline-flex. */
+    public $baseline = null;
+
     /**
      * @var float
      */
@@ -334,6 +337,198 @@ class LineBox
         }
 
         $this->h = $h;
+        $this->recalculate_flex_metrics();
+    }
+
+    /** Native inline metrics; ordinary lines deliberately keep their legacy path. */
+    public function recalculate_flex_metrics(): void
+    {
+        $this->baseline = null;
+        foreach ($this->_frames as $frame) {
+            if ($frame instanceof \Dompdf\FrameDecorator\Flex && $frame->get_positioner() instanceof InlinePositioner) {
+                $this->baseline = 0.0;
+                break;
+            }
+        }
+        if ($this->baseline === null) {
+            return;
+        }
+        $style = $this->_block_frame->get_style();
+        $metrics = $this->_block_frame->get_dompdf()->getFontMetrics();
+        $fontHeight = $metrics->getFontHeight($style->font_family, $style->font_size);
+        $strut = $fontHeight * $style->line_height / ($style->font_size > 0 ? $style->font_size : 1);
+        $ascent = $metrics->getFontBaseline($style->font_family, $style->font_size) + ($strut - $fontHeight) / 2;
+        $descent = $strut - $ascent;
+        foreach ($this->frames_to_align() as $frame) {
+            [$height, $baseline, $leading, $align, $shift] = $this->flex_frame_metrics($frame);
+            if (in_array($align, ["top", "bottom", "middle", "sub", "super", "text-top", "text-bottom"], true)) {
+                continue;
+            }
+            $ascent = max($ascent, $baseline + $leading + $shift);
+            $descent = max($descent, $height - $baseline - $leading - $shift);
+        }
+        $this->baseline = $ascent;
+        $this->h = max($this->h, $ascent + $descent);
+    }
+
+    /** Target frame y relative to the line, not a movement delta. */
+    public function get_vertical_offset(AbstractFrameDecorator $frame): ?float
+    {
+        if ($this->baseline === null) {
+            return null;
+        }
+        [$height, $baseline, $leading, $align, $shift] = $this->flex_frame_metrics($frame);
+        if ($align === "top") {
+            return $leading;
+        }
+        if ($align === "bottom") {
+            return $this->h - $height + $leading;
+        }
+        if (in_array($align, ["middle", "sub", "super", "text-top", "text-bottom"], true)) {
+            // Preserve the native special-alignment limitations; no new x-height approximation.
+            return $this->get_legacy_vertical_offset($frame);
+        }
+        return $this->baseline - $baseline - $shift;
+    }
+
+    /** Native solitary-atomic exception, shared with local baseline recovery. */
+    public function is_legacy_alignment_skipped(AbstractFrameDecorator $frame): bool
+    {
+        $display = $frame->get_style()->display;
+        if ($display === "inline" || $display === "-dompdf-list-bullet") {
+            return false;
+        }
+        foreach ($this->get_frames() as $other) {
+            if ($other !== $frame && !($other->is_text_node() && $other->get_node()->nodeValue === "")) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** Existing native movement delta; distinct from the flex-line local target. */
+    public function get_legacy_vertical_offset(AbstractFrameDecorator $frame): float
+    {
+        $fontMetrics = $frame->get_dompdf()->getFontMetrics();
+        $height = $this->h;
+        $style = $frame->get_style();
+        $isInlineBlock = $style->display !== "inline"
+            && $style->display !== "-dompdf-list-bullet";
+
+        $baseline = $fontMetrics->getFontBaseline($style->font_family, $style->font_size);
+        $y_offset = 0;
+
+        //FIXME: The 0.8 ratio applied to the height is arbitrary (used to accommodate descenders?)
+        if ($isInlineBlock) {
+            // Workaround: Skip vertical alignment if the frame is the
+            // only one one the line, excluding empty text frames, which
+            // may be the result of trailing white space
+            // FIXME: This special case should be removed once vertical
+            // alignment is properly fixed
+            if ($this->is_legacy_alignment_skipped($frame)) {
+                return 0.0;
+            }
+
+            $marginHeight = $frame->get_margin_height();
+            $imageHeightDiff = $height * 0.8 - $marginHeight;
+
+            $align = $frame->get_style()->vertical_align;
+            if (in_array($align, \Dompdf\Css\Style::VERTICAL_ALIGN_KEYWORDS, true)) {
+                switch ($align) {
+                    case "middle":
+                        $y_offset = $imageHeightDiff / 2;
+                        break;
+
+                    case "sub":
+                        $y_offset = 0.3 * $height + $imageHeightDiff;
+                        break;
+
+                    case "super":
+                        $y_offset = -0.2 * $height + $imageHeightDiff;
+                        break;
+
+                    case "text-top": // FIXME: this should be the height of the frame minus the height of the text
+                        $y_offset = $height - $style->line_height;
+                        break;
+
+                    case "top":
+                        break;
+
+                    case "text-bottom": // FIXME: align bottom of image with the descender?
+                    case "bottom":
+                        $y_offset = 0.3 * $height + $imageHeightDiff;
+                        break;
+
+                    case "baseline":
+                    default:
+                        $y_offset = $imageHeightDiff;
+                        break;
+                }
+            } else {
+                $y_offset = $baseline - (float)$style->length_in_pt($align, $style->font_size) - $marginHeight;
+            }
+        } else {
+            $parent = $frame->get_parent();
+            if ($parent instanceof \Dompdf\FrameDecorator\TableCell) {
+                $align = "baseline";
+            } else {
+                $align = $parent->get_style()->vertical_align;
+            }
+            if (in_array($align, \Dompdf\Css\Style::VERTICAL_ALIGN_KEYWORDS, true)) {
+                switch ($align) {
+                    case "middle":
+                        $y_offset = ($height * 0.8 - $baseline) / 2;
+                        break;
+
+                    case "sub":
+                        $y_offset = $height * 0.8 - $baseline * 0.5;
+                        break;
+
+                    case "super":
+                        $y_offset = $height * 0.8 - $baseline * 1.4;
+                        break;
+
+                    case "text-top":
+                    case "top": // Not strictly accurate, but good enough for now
+                        break;
+
+                    case "text-bottom":
+                    case "bottom":
+                        $y_offset = $height * 0.8 - $baseline;
+                        break;
+
+                    case "baseline":
+                    default:
+                        $y_offset = $height * 0.8 - $baseline;
+                        break;
+                }
+            } else {
+                $y_offset = $height * 0.8 - $baseline - (float)$style->length_in_pt($align, $style->font_size);
+            }
+        }
+
+        return (float) $y_offset;
+    }
+
+    private function flex_frame_metrics(AbstractFrameDecorator $frame): array
+    {
+        $style = $frame->get_style();
+        $height = $frame->get_margin_height();
+        $baseline = $style->display === "inline-block" && $style->get_computed("overflow") !== "visible"
+            ? $height : ($frame->get_baseline($style->display === "inline-block") ?? $height);
+        $leading = 0.0;
+        $align = $style->vertical_align;
+        if ($frame->is_text_node()) {
+            $fontHeight = $frame->get_dompdf()->getFontMetrics()->getFontHeight($style->font_family, $style->font_size);
+            $leading = ($height - $fontHeight) / 2;
+            $parent = $frame->get_parent();
+            $align = $parent instanceof \Dompdf\FrameDecorator\TableCell ? "baseline" : $parent->get_style()->vertical_align;
+        }
+        $shift = 0.0;
+        if (!in_array($align, \Dompdf\Css\Style::VERTICAL_ALIGN_KEYWORDS, true)) {
+            $shift = (float) $style->length_in_pt($align, $style->line_height);
+        }
+        return [$height, $baseline, $leading, $align, $shift];
     }
 
     /**

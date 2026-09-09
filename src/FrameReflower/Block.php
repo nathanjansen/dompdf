@@ -231,6 +231,13 @@ class Block extends AbstractFrameReflower
             throw new Exception("Box property calculation requires containing block width");
         }
 
+        $layout = $frame->get_flex_layout();
+        if ($layout) {
+            return [$layout["width"],
+                (float) $style->length_in_pt($style->margin_left, $cb["w"]),
+                (float) $style->length_in_pt($style->margin_right, $cb["w"]), "auto", "auto"];
+        }
+
         $width = $style->length_in_pt($style->width, $cb["w"]);
 
         $values = $this->_calculate_width($width);
@@ -282,7 +289,8 @@ class Block extends AbstractFrameReflower
             $content_box = $this->_frame->get_content_box();
             $height = $last_line->y + $last_line->h - $content_box["y"];
         }
-        return $height;
+        $layout = $this->_frame->get_flex_layout();
+        return $height + ($layout["content_spacing"][1] ?? 0.0);
     }
 
     /**
@@ -297,7 +305,11 @@ class Block extends AbstractFrameReflower
         $content_height = $this->_calculate_content_height();
         $cb = $frame->get_containing_block();
 
-        $height = $style->length_in_pt($style->height, $cb["h"]);
+        $layout = $frame->get_flex_layout();
+        $heightReference = $this->get_percentage_height_reference();
+        $height = $layout ? ($layout["height"] ?? "auto")
+            : ($heightReference === null && Helpers::is_percent($style->height)
+                ? "auto" : $style->length_in_pt($style->height, $heightReference ?? 0));
         $margin_top = $style->length_in_pt($style->margin_top, $cb["w"]);
         $margin_bottom = $style->length_in_pt($style->margin_bottom, $cb["w"]);
 
@@ -409,9 +421,18 @@ class Block extends AbstractFrameReflower
 
             // Handle min/max height
             // https://www.w3.org/TR/CSS21/visudet.html#min-max-heights
-            $min_height = $this->resolve_min_height($cb["h"]);
-            $max_height = $this->resolve_max_height($cb["h"]);
-            $height = Helpers::clamp($height, $min_height, $max_height);
+            if (!$layout || $layout["height"] === null) {
+                $min_height = $this->resolve_min_height($heightReference);
+                $max_height = $heightReference === null && Helpers::is_percent($style->max_height)
+                    ? INF : $this->resolve_max_height($heightReference);
+                if ($layout && $style->box_sizing === "border-box") {
+                    $edges = (float) $style->length_in_pt([$style->padding_top, $style->padding_bottom,
+                        $style->border_top_width, $style->border_bottom_width], $cb["w"]);
+                    $min_height = max(0.0, $min_height - $edges);
+                    $max_height = max(0.0, $max_height - $edges);
+                }
+                $height = Helpers::clamp($height, $min_height, $max_height);
+            }
         }
 
         // TODO: Need to also take min/max height into account for absolute
@@ -558,11 +579,7 @@ class Block extends AbstractFrameReflower
      */
     function vertical_align()
     {
-        $fontMetrics = $this->get_dompdf()->getFontMetrics();
-
         foreach ($this->_frame->get_line_boxes() as $line) {
-            $height = $line->h;
-
             // Move all markers to the top of the line box
             foreach ($line->get_list_markers() as $marker) {
                 $x = $marker->get_position("x");
@@ -570,113 +587,12 @@ class Block extends AbstractFrameReflower
             }
 
             foreach ($line->frames_to_align() as $frame) {
-                $style = $frame->get_style();
-                $isInlineBlock = $style->display !== "inline"
-                    && $style->display !== "-dompdf-list-bullet";
-
-                $baseline = $fontMetrics->getFontBaseline($style->font_family, $style->font_size);
-                $y_offset = 0;
-
-                //FIXME: The 0.8 ratio applied to the height is arbitrary (used to accommodate descenders?)
-                if ($isInlineBlock) {
-                    // Workaround: Skip vertical alignment if the frame is the
-                    // only one one the line, excluding empty text frames, which
-                    // may be the result of trailing white space
-                    // FIXME: This special case should be removed once vertical
-                    // alignment is properly fixed
-                    $skip = true;
-
-                    foreach ($line->get_frames() as $other) {
-                        if ($other !== $frame
-                            && !($other->is_text_node() && $other->get_node()->nodeValue === "")
-                         ) {
-                            $skip = false;
-                            break;
-                        }
-                    }
-
-                    if ($skip) {
-                        continue;
-                    }
-
-                    $marginHeight = $frame->get_margin_height();
-                    $imageHeightDiff = $height * 0.8 - $marginHeight;
-
-                    $align = $frame->get_style()->vertical_align;
-                    if (in_array($align, Style::VERTICAL_ALIGN_KEYWORDS, true)) {
-                        switch ($align) {
-                            case "middle":
-                                $y_offset = $imageHeightDiff / 2;
-                                break;
-
-                            case "sub":
-                                $y_offset = 0.3 * $height + $imageHeightDiff;
-                                break;
-
-                            case "super":
-                                $y_offset = -0.2 * $height + $imageHeightDiff;
-                                break;
-
-                            case "text-top": // FIXME: this should be the height of the frame minus the height of the text
-                                $y_offset = $height - $style->line_height;
-                                break;
-
-                            case "top":
-                                break;
-
-                            case "text-bottom": // FIXME: align bottom of image with the descender?
-                            case "bottom":
-                                $y_offset = 0.3 * $height + $imageHeightDiff;
-                                break;
-
-                            case "baseline":
-                            default:
-                                $y_offset = $imageHeightDiff;
-                                break;
-                        }
-                    } else {
-                        $y_offset = $baseline - (float)$style->length_in_pt($align, $style->font_size) - $marginHeight;
-                    }
-                } else {
-                    $parent = $frame->get_parent();
-                    if ($parent instanceof TableCellFrameDecorator) {
-                        $align = "baseline";
-                    } else {
-                        $align = $parent->get_style()->vertical_align;
-                    }
-                    if (in_array($align, Style::VERTICAL_ALIGN_KEYWORDS, true)) {
-                        switch ($align) {
-                            case "middle":
-                                $y_offset = ($height * 0.8 - $baseline) / 2;
-                                break;
-
-                            case "sub":
-                                $y_offset = $height * 0.8 - $baseline * 0.5;
-                                break;
-
-                            case "super":
-                                $y_offset = $height * 0.8 - $baseline * 1.4;
-                                break;
-
-                            case "text-top":
-                            case "top": // Not strictly accurate, but good enough for now
-                                break;
-
-                            case "text-bottom":
-                            case "bottom":
-                                $y_offset = $height * 0.8 - $baseline;
-                                break;
-
-                            case "baseline":
-                            default:
-                                $y_offset = $height * 0.8 - $baseline;
-                                break;
-                        }
-                    } else {
-                        $y_offset = $height * 0.8 - $baseline - (float)$style->length_in_pt($align, $style->font_size);
-                    }
+                $target = $line->get_vertical_offset($frame);
+                if ($target !== null) {
+                    $frame->move(0.0, $line->y + $target - $frame->get_position("y"));
+                    continue;
                 }
-
+                $y_offset = $line->get_legacy_vertical_offset($frame);
                 if ($y_offset !== 0) {
                     $frame->move(0, $y_offset);
                 }
@@ -848,7 +764,12 @@ class Block extends AbstractFrameReflower
 
         $cb_y = $y + $top;
 
-        $height = $style->length_in_pt($style->height, $cb["h"]);
+        $layout = $this->_frame->get_flex_layout();
+        $cb_y += $layout["content_spacing"][0] ?? 0.0;
+        $heightReference = $this->get_percentage_height_reference();
+        $height = $layout ? ($layout["height"] ?? "auto")
+            : ($heightReference === null && Helpers::is_percent($style->height)
+                ? "auto" : $style->length_in_pt($style->height, $heightReference ?? 0));
         if ($height === "auto") {
             $height = ($cb["h"] + $cb["y"]) - $bottom - $cb_y;
         }

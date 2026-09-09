@@ -20,6 +20,37 @@ use Dompdf\Tests\TestCase;
 
 class StyleTest extends TestCase
 {
+    public function testComputedLonghandIgnoresAssignedUsedValue(): void
+    {
+        $sheet = new Stylesheet(new Dompdf());
+        $parent = new Style($sheet);
+        $parent->set_prop("--height", "80pt");
+        $parent->set_prop("height", "var(--height)");
+        $child = new Style($sheet);
+        $child->set_prop("height", "inherit");
+        $child->inherit($parent);
+        $parent->set_used("height", 15.0);
+        $child->set_used("height", 20.0);
+        $this->assertSame(80.0, $parent->get_computed("height"));
+        $this->assertSame(80.0, $child->get_computed("height"));
+        $this->assertSame(15.0, $parent->height);
+        $this->assertSame(20.0, $child->height);
+    }
+
+    public function testBoxSizingStrictKeywords(): void
+    {
+        $style = new Style(new Stylesheet(new Dompdf()));
+        $this->assertSame("content-box", $style->box_sizing);
+        $style->set_prop("box_sizing", "BORDER-BOX");
+        $this->assertSame("border-box", $style->box_sizing);
+        $style->set_prop("box_sizing", "padding-box");
+        $this->assertSame("border-box", $style->box_sizing);
+        $style->set_prop("box_sizing", "content-box border-box");
+        $this->assertSame("border-box", $style->box_sizing);
+        $style->set_prop("box_sizing", "initial");
+        $this->assertSame("content-box", $style->box_sizing);
+    }
+
     public function testInitial(): void
     {
         $dompdf = new Dompdf();

@@ -11,6 +11,7 @@ use Dompdf\Exception;
 use Dompdf\Helpers;
 use Dompdf\Frame;
 use Dompdf\Renderer;
+use Dompdf\FrameReflower\FlexLayoutContext;
 
 /**
  * Decorates frames for page layout
@@ -55,6 +56,92 @@ class Page extends AbstractFrameDecorator
      * @var array
      */
     protected $_floating_frames = [];
+
+    /** @var array Independent item flows, with the suspended page state. */
+    private $flex_contexts = [];
+
+    public function get_flex_context(): ?FlexLayoutContext
+    {
+        return $this->flex_contexts ? end($this->flex_contexts)[0] : null;
+    }
+
+    public function get_bottom_page_edge(): float
+    {
+        return $this->bottom_page_edge;
+    }
+
+    private function is_in_absolute_positioned_subtree(Frame $frame): bool
+    {
+        // Break eligibility follows real ancestry, not the local search boundary.
+        do {
+            if ($frame->is_absolute()) {
+                return true;
+            }
+        } while ($frame = $frame->get_parent());
+        return false;
+    }
+
+    /** Check the container's own box, without backtracking into unlaid-out items. */
+    public function check_flex_container_break(AbstractFrameDecorator $frame): bool
+    {
+        $context = $this->get_flex_context();
+        if (($context && $context->is_measuring()) || $this->is_in_absolute_positioned_subtree($frame)) {
+            return false;
+        }
+        if (Helpers::lengthLessOrEqual($frame->get_position("y") + $frame->get_margin_height(), $this->bottom_page_edge)) {
+            return false;
+        }
+        $pageTop = $this->get_containing_block("y")
+            + (float) $this->get_style()->length_in_pt($this->get_style()->margin_top, $this->get_containing_block("h"));
+        if (!$frame->_already_pushed && Helpers::lengthGreater($frame->get_position("y"), $pageTop)) {
+            $frame->split(null, true);
+            $frame->_already_pushed = true;
+            $this->_page_full = true;
+            return true;
+        }
+        // An indivisible oversized box at page top has already been accepted.
+        $frame->_already_pushed = true;
+        return false;
+    }
+
+    /** Commit one prepared container remainder to the current (possibly local) flow. */
+    public function commit_flex_fragment(AbstractFrameDecorator $fragment, AbstractFrameDecorator $continuation): void
+    {
+        $fragment->get_parent()->insert_child_after($continuation, $fragment);
+        $context = $this->get_flex_context();
+        if ($context && $context->get_item() === $fragment) {
+            $context->capture_continuation($continuation, false);
+        } else {
+            $continuation->split(null, true);
+        }
+        $this->_page_full = true;
+    }
+
+    public function push_flex_context(FlexLayoutContext $context): void
+    {
+        if ($context->get_item()->get_root() !== $this) {
+            throw new \LogicException("The item belongs to a different page");
+        }
+        foreach ($this->flex_contexts as $entry) {
+            if ($entry[0] === $context) {
+                throw new \LogicException("The item context is already active");
+            }
+        }
+        $this->flex_contexts[] = [$context, $this->_page_full, $this->bottom_page_edge, $this->_floating_frames, $this->_in_table];
+        $this->_page_full = false;
+        $this->_floating_frames = [];
+        if ($context->get_available_block_size() !== null) {
+            $this->bottom_page_edge = $context->get_item()->get_containing_block("y") + $context->get_available_block_size();
+        }
+    }
+
+    public function pop_flex_context(FlexLayoutContext $context): void
+    {
+        if ($this->get_flex_context() !== $context) {
+            throw new \LogicException("Item contexts must be restored in LIFO order");
+        }
+        [, $this->_page_full, $this->bottom_page_edge, $this->_floating_frames, $this->_in_table] = array_pop($this->flex_contexts);
+    }
 
     //........................................................................
 
@@ -164,6 +251,10 @@ class Page extends AbstractFrameDecorator
      */
     function check_forced_page_break(Frame $frame)
     {
+        $context = $this->get_flex_context();
+        if ($context && ($context->is_measuring() || !$context->contains($frame) || $frame === $context->get_item())) {
+            return false;
+        }
         // Skip check if page is already split and for the body
         if ($this->_page_full || $frame->get_node()->nodeName === "body") {
             return false;
@@ -321,6 +412,10 @@ class Page extends AbstractFrameDecorator
      */
     protected function _page_break_allowed(Frame $frame)
     {
+        $context = $this->get_flex_context();
+        if ($context && (!$context->contains($frame) || $frame === $context->get_item())) {
+            return false;
+        }
         Helpers::dompdf_debug("page-break", "_page_break_allowed(" . $frame->get_node()->nodeName . ")");
         $display = $frame->get_style()->display;
 
@@ -363,7 +458,7 @@ class Page extends AbstractFrameDecorator
             // Rules B & D
             $parent = $frame->get_parent();
             $p = $parent;
-            while ($p) {
+            while ($p && (!$context || $context->contains($p))) {
                 if ($p->get_style()->page_break_inside === "avoid") {
                     Helpers::dompdf_debug("page-break", "parent->inside: avoid");
 
@@ -428,7 +523,7 @@ class Page extends AbstractFrameDecorator
 
                 // Rule D
                 $p = $block_parent;
-                while ($p) {
+                while ($p && (!$context || $context->contains($p))) {
                     if ($p->get_style()->page_break_inside === "avoid") {
                         Helpers::dompdf_debug("page-break", "parent->inside: avoid");
 
@@ -510,7 +605,7 @@ class Page extends AbstractFrameDecorator
                     }
             
                     $p = $table;
-                    while ($p) {
+                    while ($p && (!$context || $context->contains($p))) {
                         if ($p->get_style()->page_break_inside === "avoid") {
                             Helpers::dompdf_debug("page-break", "parent->inside: avoid");
 
@@ -549,6 +644,10 @@ class Page extends AbstractFrameDecorator
      */
     function check_page_break(Frame $frame)
     {
+        $context = $this->get_flex_context();
+        if ($context && ($context->is_measuring() || !$context->contains($frame))) {
+            return false;
+        }
         if ($this->_page_full || $frame->_already_pushed
             // Never check for breaks on empty text nodes
             || ($frame->is_text_node() && $frame->get_node()->nodeValue === "")
@@ -562,15 +661,12 @@ class Page extends AbstractFrameDecorator
             if ($display == "table-row") {
                 if ($p->_already_pushed) { return false; }
             }
-        } while ($p = $p->get_parent());
+        } while (($p = $p->get_parent()) && (!$context || $context->contains($p)));
 
-        // If the frame is absolute or fixed it shouldn't break
-        $p = $frame;
-        do {
-            if ($p->is_absolute()) {
-                return false;
-            }
-        } while ($p = $p->get_parent());
+        // If the frame or any ancestor is absolute or fixed it shouldn't break.
+        if ($this->is_in_absolute_positioned_subtree($frame)) {
+            return false;
+        }
 
         $margin_height = $frame->get_margin_height();
 
@@ -580,7 +676,7 @@ class Page extends AbstractFrameDecorator
         // If a split is to occur here, then the bottom margins & paddings of all
         // parents of $frame must fit on the page as well:
         $p = $frame->get_parent();
-        while ($p && $p !== $this) {
+        while ($p && $p !== $this && (!$context || $context->contains($p))) {
             $cbw = $p->get_containing_block("w");
             $max_y += (float) $p->get_style()->computed_bottom_spacing($cbw);
             $p = $p->get_parent();
@@ -605,7 +701,7 @@ class Page extends AbstractFrameDecorator
         Helpers::dompdf_debug("page-break", "Starting search");
         while ($iter) {
             // echo "\nbacktrack: " .$iter->get_node()->nodeName ." ".spl_object_hash($iter->get_node()). "";
-            if ($iter === $this) {
+            if ($iter === $this || ($context && $iter === $context->get_item())) {
                 Helpers::dompdf_debug("page-break", "reached root.");
                 // We've reached the root in our search.  Just split at $frame.
                 break;
@@ -677,6 +773,22 @@ class Page extends AbstractFrameDecorator
         }
 
         $this->_in_table = $in_table;
+
+        if ($context) {
+            // No internal breakpoint: defer the whole item on a partially used
+            // page, or allow oversized first content to make progress at the top.
+            $item = $context->get_item();
+            $pageTop = $this->get_containing_block("y")
+                + (float) $this->get_style()->length_in_pt($this->get_style()->margin_top, $this->get_containing_block("w"));
+            $layout = $context->get_item_layout();
+            $itemTop = $layout !== null ? $layout["y"] : $item->get_containing_block("y");
+            if (!$item->_already_pushed && Helpers::lengthGreater($itemTop, $pageTop)) {
+                $context->defer();
+                $this->_page_full = true;
+                return true;
+            }
+            return false;
+        }
 
         // No valid page break found.  Just break at $frame.
         Helpers::dompdf_debug("page-break", "no valid break found, just splitting.");
